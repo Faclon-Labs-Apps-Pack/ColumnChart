@@ -15,10 +15,28 @@ export async function resolve(
 
   if (bindings.length === 0) return { config: envelope.uiConfig, data: [] };
 
+  const UNS_TOPIC_RE = /^uns:[^/]+:\/\//;
+  const validBindings = bindings.filter(({ topic }) => {
+    if (!UNS_TOPIC_RE.test(topic)) {
+      console.error(
+        `[MiniEngine] Invalid topic format: "${topic}". ` +
+        `Expected "uns:wsId://path". ` +
+        `Check that Angular's resolveUNSValue returns {{uns:wsId://path}} ` +
+        `and that this.meta is keyed by workspace NAME.`
+      );
+      return false;
+    }
+    return true;
+  });
+
+  if (validBindings.length === 0 && bindings.length > 0) {
+    return { config: envelope.uiConfig, data: [] };
+  }
+
   try {
     const items = await resolveAndCompute(
       ctx.authentication,
-      bindings.map(({ key, topic }) => ({ key, topic })),
+      validBindings.map(({ key, topic }) => ({ key, topic })),
       startTime,
       endTime,
     );

@@ -36,10 +36,16 @@ and a **module-level cache** shared across every widget on the page:
 ## UNS Binding Value Format
 
 ```
-{{uns:wsId://nodePath}}
+{{uns:workspaceId://absoluteNodePath}}
 ```
 
-Example: `{{uns:ws_abc123://plant1/line1/voltage}}`
+Example: `{{uns:ws_abc123://iosense/plant1/voltage:last}}`
+
+- Top-level key in `uiConfig`: stored WITH `{{}}` braces
+- Entry in `dynamicBindingPathList.topic`: stored WITHOUT braces → `uns:ws_abc123://iosense/plant1/voltage:last`
+- The mini-engine validates all topics against `/^uns:[^/]+:\/\//` — any other format is rejected
+
+**Never** store a workspace-name-based path (e.g. `Akash - Test/Voltage/:last`) — it bypasses UNS resolution entirely.
 
 `buildDynamicBindingPathList` extracts the inner string as the topic for `resolveAndCompute`.
 
@@ -130,6 +136,74 @@ User clicks leaf "Sensor1"
 
 ---
 
+## Angular Injection Contract
+
+When Angular injects UNS props instead of the dev harness hook, all three props must be present:
+
+```typescript
+// Angular buildProps()
+{
+  unsTree: this.unsService.tree,          // workspace name → node tree (plain object)
+  isLoadingTree: this.unsService.loading,
+  onLoadWorkspaces: async () => { ... },  // triggers node fetch
+  resolveUNSValue: (raw: string) => this.unsService.resolve(raw),
+}
+```
+
+### `resolveUNSValue` Contract
+
+Angular's `resolve()` must:
+1. Accept `{{WorkspaceName/NodeName/:suffix}}` (display path from UNSPathInput)
+2. Look up workspace ID from its meta map using workspace **NAME** as key
+3. Return `{{uns:wsId://absoluteNodePath}}`
+
+```typescript
+resolve(rawValue: string): string {
+  if (rawValue.startsWith('{{') && rawValue.endsWith('}}')) {
+    const key = rawValue.slice(2, -2);        // strip {{ }}
+    const meta = this.meta.get(key);           // keyed by WORKSPACE NAME
+    if (meta) return `{{uns:${meta.wsId}://${meta.nodePath}}}`;
+  }
+  return rawValue;  // static string — pass through unchanged
+}
+```
+
+### `this.meta` Population Rules
+
+`this.meta` must be a `Map<string, { wsId: string; nodePath: string }>` where:
+- **Key format:** `WorkspaceName/TagName/:suffix` (workspace NAME, NOT ID)
+- **Must be populated** when workspace nodes are fetched, not just when workspace list loads
+
+Debug: if `resolve()` returns unchanged display paths, add:
+```typescript
+console.log('[UNS resolve] key:', key, '| meta size:', this.meta.size, '| found:', this.meta.has(key));
+```
+
+- `meta size: 0` → nodes not yet fetched → `loadWorkspaceNodes()` missing or not awaited
+- `meta size > 0` but `found: false` → key format mismatch → meta uses ID prefix instead of NAME prefix
+
+### Correct Meta Population Pattern (mirrors dev harness `useUNSTree.ts`)
+
+```typescript
+async loadWorkspaceNodes(wsName: string, wsId: string, token: string): Promise<void> {
+  const nodes = await this.fetchUNSNodes(token, `uns:${wsId}`, 'Operational', 100, true);
+  const tags = nodes.filter(n => n.type !== 'virtualProperty' && n.name);
+  const vps  = nodes.filter(n => n.type === 'virtualProperty' && n.name);
+  for (const tag of tags) {
+    const matching = vps.filter(vp => vp.path?.startsWith(`${tag.path}:`));
+    for (const vp of matching) {
+      const suffix = vp.path.substring(vp.path.lastIndexOf(':'));
+      this.meta.set(`${wsName}/${tag.name}/${suffix}`, { wsId, nodePath: vp.path }); // wsName key!
+    }
+    if (!matching.length) {
+      this.meta.set(`${wsName}/${tag.name}`, { wsId, nodePath: tag.path });
+    }
+  }
+}
+```
+
+---
+
 ## Checklist
 
 - [ ] `import { useUNSTree } from '../../iosense-sdk/useUNSTree'` in configurator
@@ -142,6 +216,8 @@ User clicks leaf "Sensor1"
 - [ ] NO `onFolderSelect` prop — proxy handles it automatically
 - [ ] NO local refs (`workspaceMapRef`, `fetchedWsRef`, etc.) — all inside the hook
 - [ ] NO `fetchUNSNodes` import in configurator — only the hook uses it
+- [ ] Angular's `resolveUNSValue` injection returns `{{uns:wsId://path}}` format (not display name format)
+- [ ] Angular's `this.meta` is keyed by workspace NAME, populated when nodes are fetched (not just workspace list)
 
 ---
 

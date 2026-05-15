@@ -54,6 +54,20 @@ LOOP:
     Spawn Agent(subagent_type="Explore") with the prompt below.
     Receive JSON report: { passed: string[], issues: Issue[] }
 
+  STEP 2.5 — ORCHESTRATOR SPOT-CHECK (always run before evaluating reviewer output)
+    Personally verify these checks by reading the source files directly:
+    - C2.4: Open the widget .tsx file. Confirm the props interface has `| undefined` on config AND
+            the first line of the component body contains `if (!config`. If either is missing → add
+            to critical issues regardless of what reviewer said.
+    - C3.3: Open both index.ts files. Confirm mount(), update(), unmount() all have bodies (not just
+            `{}`). If any is an empty stub → add to critical issues.
+    - C5.3: Open the configurator .tsx file. Confirm the useEffect syncing from props has a null
+            guard on config before accessing config.uiConfig. If missing → add to critical issues.
+    - C1.6: Open the configurator .tsx file. Search for `onChange({` and `timeTabConfig`. If
+            `timeTabConfig` is emitted in the envelope payload but `timeConfig:` is absent from the
+            same payload → add to critical issues regardless of what reviewer said.
+    Merge spot-check findings into the reviewer's issue list before proceeding.
+
   STEP 3 — EVALUATE
     critical = issues where severity === "critical"
     warnings = issues where severity === "warning"
@@ -112,8 +126,10 @@ FILES TO READ:
 - C1.1: dynamicBindingPathList is always present in buildEnvelope() output (even [])
 - C1.2: No apiConfig field emitted anywhere in the envelope
 - C1.3: dynamicBindingPathList[n].topic has NO {{ }} braces (stripped by scanner)
+- C1.3b: dynamicBindingPathList[n].topic matches format `uns:wsId://path` — never a workspace display name (e.g. "WorkspaceName/node/:last" is invalid; mini-engine's UNS_TOPIC_RE guard will filter it out)
 - C1.4: Array keys use bracket notation: plotLines[0].value NOT plotLines.0.value
-- C1.5: uiConfig stores bindable fields WITH {{ }} intact (e.g. "{{iosense/...}}")
+- C1.5: uiConfig stores bindable fields WITH {{ }} intact (e.g. "{{uns:wsId://...}}")
+- C1.6: If a time window is configured, envelope emits `timeConfig` (TimeConfig shape) NOT `timeTabConfig` as the engine-facing key. `timeTabConfig` may co-exist for UI re-hydration but `timeConfig` must be present whenever time data is needed by the mini-engine.
 
 ### Category 2 — Widget Purity
 - C2.1: No fetch(), axios, XMLHttpRequest calls inside Gauge.tsx
@@ -190,6 +206,7 @@ Category 1 (Envelope):
 - If C1.2: search for apiConfig anywhere in GaugeConfiguration.tsx, remove it
 - If C1.3: check buildDynamicBindingPathList — ensure match[1] is used (strips braces), not obj.trim()
 - If C1.4: check walk() path concatenation — arrays must use [n] not .n
+- If C1.6: In the configurator's TimeTabConfiguration onChange handler, add `timeConfig: buildTimeConfig(value)` to the onChange payload alongside `timeTabConfig: value`. Add a `buildTimeConfig(ttc)` helper that maps TimeTabUIConfig → TimeConfig: timezone→timezone, timeType→type (default 'local'), defaultDurationId→defaultDurationId, allDurations→allDurations (map GTPPreset to Duration, defaulting xPeriod to 'hour'), defaultPeriodicity→defaultPeriodicity, startTime/endTime→null. Return undefined if ttc is empty.
 
 Category 2 (Widget Purity):
 - If C2.1: remove fetch/axios call from Gauge.tsx; if it was fetching data, read it from the data prop via getValue() instead

@@ -30,6 +30,8 @@ export default (env, argv) => {
           'react-dom/server': 'ReactDOMServer',
           'react/jsx-runtime': 'ReactJSXRuntime',
           'react/jsx-dev-runtime': 'ReactJSXRuntime',
+          highcharts: 'Highcharts',
+          apexcharts: 'ApexCharts',
         }
       : {},
     resolve: { extensions: ['.tsx', '.ts', '.js'] },

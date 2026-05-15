@@ -54,13 +54,15 @@ A bindable field is any `uiConfig` field whose value comes from a live device/se
 
 Bindable fields use a **plain `<input type="text">`** or the design-sdk `TextInput`. The user types the UNS topic path wrapped in `{{}}`.
 
+> **Prefer `UNSPathInput` over `TextInput` for all bindable fields.** `UNSPathInput` (from `@faclon-labs/design-sdk/UNSPathInput`) adds a `/`-triggered tree browser that resolves workspace names to `{{uns:wsId://path}}` format automatically. Only use bare `TextInput` for fields where UNS browsing is not appropriate. See **UNSPathInput.md** for the full pattern.
+
 The placeholder must always show an example `{{topic}}` value.
 
 ```tsx
 // ✅ CORRECT — bindable field, user types {{topic}} syntax
 <TextInput
   label="Variable"
-  placeholder="e.g. {{iosense/plant1/energy/line1/panelA/DEVICE/analytics/voltage/lastdp}}"
+  placeholder="e.g. {{uns:wsId://iosense/plant1/voltage:last}} or type / to browse"
   value={variable}
   onChange={({ value }) => setVariable(value)}
 />
@@ -130,11 +132,11 @@ function buildEnvelope(existing, variable, sources, style): WidgetEnvelope {
 
 ```typescript
 // User typed "{{iosense/plant1/.../voltage/lastdp}}" in the variable field
-uiConfig.variable = "{{iosense/plant1/energy/line1/panelA/TACEM_A4/analytics/voltage/lastdp}}"
+uiConfig.variable = "{{uns:ws_abc123://iosense/plant1/voltage:last}}"
 
 // buildDynamicBindingPathList extracts the topic (strips {{ }})
 dynamicBindingPathList: [
-  { key: "variable", topic: "iosense/plant1/energy/line1/panelA/TACEM_A4/analytics/voltage/lastdp" },
+  { key: "sources[0].unsPath", topic: "uns:ws_abc123://iosense/plant1/voltage:last" },
 ]
 
 // Static fields (no {{}}) are NOT in the list
@@ -240,7 +242,7 @@ const DataPointConfiguration = () => {
   return (
     <TextInput
       label="Variable"
-      placeholder="e.g. {{iosense/plant1/energy/line1/panelA/DEVICE/analytics/voltage/lastdp}}"
+      placeholder="e.g. {{uns:wsId://iosense/plant1/voltage:last}} or type / to browse"
       value={variable}
       onChange={({ value }) => { setVariable(value); emit(value, sources, style); }}
     />
@@ -277,8 +279,14 @@ paths.push({ key: currentPath, topic: match[1] });    // ← correct
 const [variable, setVariable] = useState('{{API1.data}}');
 
 // ❌ WRONG — topic still has {{ }} braces
-{ key: "variable", topic: "{{iosense/plant1/.../lastdp}}" }  // ← braces not stripped
-{ key: "variable", topic: "iosense/plant1/.../lastdp" }      // ← correct
+{ key: "sources[0].unsPath", topic: "{{uns:ws_abc://iosense/plant1/voltage:last}}" }   // ← braces not stripped
+{ key: "sources[0].unsPath", topic: "uns:ws_abc://iosense/plant1/voltage:last" }       // ← correct
+
+// ❌ WRONG — workspace name format (resolveUNSValue was not called or returned unchanged)
+{ key: "sources[0].unsPath", topic: "Akash - Test/Voltage/:last" }  // ← display name leaked through
+
+// ✅ CORRECT — workspace ID format
+{ key: "sources[0].unsPath", topic: "uns:ws_abc123://iosense/plant1/voltage:last" }
 
 // ❌ WRONG — apiConfig in envelope
 return { timeConfig, apiConfig, uiConfig, dynamicBindingPathList };  // ← apiConfig must not exist

@@ -43,6 +43,43 @@ useEffect(() => {
 
 ---
 
+## UNS Injection Props (Angular Production vs Dev Harness)
+
+The configurator supports two UNS prop injection modes. The harness switches automatically based on whether all three functional props are present:
+
+```typescript
+const hasInjectedUNS =
+  props.unsTree !== undefined &&
+  props.onLoadWorkspaces !== undefined &&
+  props.resolveUNSValue !== undefined;
+
+// All three present → use Angular-injected props
+// Any missing → fall back to useUNSTree hook (dev harness path)
+```
+
+**Dev harness (App.tsx):** pass only `authentication`. The hook fetches workspaces and resolves topics automatically.
+
+**Angular production:** inject all three:
+```typescript
+{
+  unsTree: this.unsService.tree,
+  isLoadingTree: this.unsService.loading,
+  onLoadWorkspaces: async () => {
+    await this.unsService.loadWorkspaces(token);
+    // Also fetch nodes to populate this.meta before user selects:
+    for (const [wsName, wsId] of Object.entries(this.unsService.workspaceMap)) {
+      await this.unsService.loadWorkspaceNodes(wsName, wsId, token);
+    }
+    this.getApi()?.update('widget-config', this.buildProps());
+  },
+  resolveUNSValue: (raw: string) => this.unsService.resolve(raw),
+}
+```
+
+See **UNSPathInput.md** for the full Angular injection contract and `this.meta` population rules.
+
+---
+
 ## Full App.tsx Template
 
 ```tsx
