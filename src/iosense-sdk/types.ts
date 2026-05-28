@@ -52,7 +52,7 @@ export interface Duration {
   id: string;
   label?: string;
   x?: number;
-  xPeriod: string; // "minute" | "hour" | "day" | "week" | "month" | "year"
+  xPeriod: string;
 }
 
 export interface TimeConfig {
@@ -70,25 +70,78 @@ export type WidgetEvent =
   | { type: 'FILTER_CHANGE'; payload: Record<string, unknown> };
 
 // ---------------------------------------------------------------------------
-// WidgetTemplate — replace with your widget's config shape after init-widget.sh
+// ColumnChart — widget-specific types
 // ---------------------------------------------------------------------------
 
-export interface WidgetTemplateUIConfig {
-  // Add your widget's render config fields here.
-  // Example:
-  //   title: string;
-  //   variable: string;       // bindable — user types {{topic}}
-  //   style: { card: { wrapInCard: boolean; bg: string } };
+export interface ColumnChartSeriesConfig {
+  _id: string;
+  unsPath: string;   // bindable — stores {{uns:wsId://path}} (series binding)
+  label: string;
+  color?: string;
+  unit?: string;
+  yAxis?: 0 | 1;    // 0 = left (default), 1 = right
+}
+
+export interface FixedSeriesConfig {
+  _id: string;
+  unsPath: string;   // bindable — stores {{uns:wsId://path}} (scalar binding)
+  label: string;
+  color?: string;
+  yAxis?: 0 | 1;
+}
+
+export interface StackConfig {
+  _id: string;
+  name: string;
+  seriesIds: string[];   // _id refs into series[] and fixedSeries[]
+}
+
+export interface PlotLineConfig {
+  _id: string;
+  value: number | string;  // string = {{topic}} binding resolved at runtime
+  label: string;
+  color: string;
+  width?: number;
+  dashStyle?: 'Solid' | 'Dash' | 'Dot' | 'DashDot' | 'LongDash' | 'ShortDash';
+}
+
+export interface PlotBandConfig {
+  _id: string;
+  from: number | string;   // string = {{topic}} binding resolved at runtime
+  to: number | string;
+  label: string;
+  color: string;
+}
+
+export interface ChartConfig {
+  _id: string;
+  title: string;
+  series: ColumnChartSeriesConfig[];
+  fixedSeries: FixedSeriesConfig[];
+  stacks: StackConfig[];
+  plotLines: PlotLineConfig[];
+  plotBands: PlotBandConfig[];
+}
+
+export interface ColumnChartUIConfig {
+  title: string;
+  description?: string;
+  charts: ChartConfig[];
   style: {
     card: { wrapInCard: boolean; bg: string };
+    stacked: boolean;
+    showLegend: boolean;
+    showDataLabels: boolean;
+    yAxisUnit: string;
   };
 }
 
-export interface WidgetTemplateEnvelope {
+export interface ColumnChartEnvelope {
   _id: string;
-  type: 'WidgetTemplate';
+  type: 'ColumnChart';
   general: { title: string };
   timeConfig?: TimeConfig;
-  uiConfig: WidgetTemplateUIConfig;
+  timeTabConfig?: Record<string, unknown>;
+  uiConfig: ColumnChartUIConfig;
   dynamicBindingPathList: Array<BindingEntry>;
 }

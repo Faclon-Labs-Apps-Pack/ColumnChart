@@ -6,8 +6,8 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 const COMPONENTS = {
-  WidgetTemplate: './src/components/WidgetTemplate/index.ts',
-  WidgetTemplateConfiguration: './src/components/WidgetTemplateConfiguration/index.ts',
+  ColumnChart: './src/components/ColumnChart/index.ts',
+  ColumnChartConfiguration: './src/components/ColumnChartConfiguration/index.ts',
 };
 
 export default (env, argv) => {
@@ -71,7 +71,7 @@ export default (env, argv) => {
     ...(!isProd && {
       devServer: {
         static: path.resolve(__dirname, 'public'),
-        port: 3000,
+        port: 3003,
         hot: true,
         open: false,
         historyApiFallback: true,

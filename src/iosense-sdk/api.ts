@@ -22,14 +22,17 @@ export async function resolveAndCompute(
   config: Array<BindingEntry>,
   startTime: number,
   endTime: number,
+  timeFrame?: string,
 ): Promise<Array<{ key: string; value: string | number | null | SeriesPayload }>> {
+  const body: Record<string, unknown> = { graph: GRAPH, config, startTime, endTime };
+  if (timeFrame) body.timeFrame = timeFrame;
   const res = await fetch(`${STAGING_BASE}/account/uns/resolveAndCompute`, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
       Authorization: `Bearer ${authentication}`,
     },
-    body: JSON.stringify({ graph: GRAPH, config, startTime, endTime }),
+    body: JSON.stringify(body),
   });
   const json = await res.json();
   const rawItems: Record<string, unknown>[] = json?.data ?? [];

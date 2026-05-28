@@ -1,17 +1,17 @@
 import { useState, useEffect } from 'react';
-import { WidgetTemplate } from './components/WidgetTemplate/WidgetTemplate';
-import { WidgetTemplateConfiguration } from './components/WidgetTemplateConfiguration/WidgetTemplateConfiguration';
-import { WidgetTemplateEnvelope, DataEntry, WidgetEvent } from './iosense-sdk/types';
+import { ColumnChart } from './components/ColumnChart/ColumnChart';
+import { ColumnChartConfiguration } from './components/ColumnChartConfiguration/ColumnChartConfiguration';
+import { ColumnChartEnvelope, DataEntry, WidgetEvent } from './iosense-sdk/types';
 import { validateSSOToken } from './iosense-sdk/api';
 import { resolve } from './iosense-sdk/mini-engine';
 import '@faclon-labs/design-sdk/styles.css';
 import './App.css';
 
 export default function App() {
-  const [envelope, setEnvelope] = useState<WidgetTemplateEnvelope | undefined>(undefined);
+  const [envelope, setEnvelope] = useState<ColumnChartEnvelope | undefined>(undefined);
   const [data, setData] = useState<DataEntry[]>([]);
   const [auth, setAuth] = useState<string>(localStorage.getItem('bearer_token') ?? '');
-  const [timeOverride, setTimeOverride] = useState<{ startTime: number; endTime: number } | undefined>(undefined);
+  const [timeOverride, setTimeOverride] = useState<{ startTime: number; endTime: number; periodicity?: string } | undefined>(undefined);
 
   useEffect(() => {
     const params = new URLSearchParams(window.location.search);
@@ -46,6 +46,7 @@ export default function App() {
       setTimeOverride({
         startTime: Number(event.payload.startTime),
         endTime: Number(event.payload.endTime),
+        periodicity: event.payload.periodicity,
       });
     }
   }
@@ -53,11 +54,11 @@ export default function App() {
   return (
     <div className="app">
       <div className="app__config">
-        <WidgetTemplateConfiguration config={envelope} authentication={auth} onChange={setEnvelope} />
+        <ColumnChartConfiguration config={envelope} authentication={auth} onChange={setEnvelope} />
       </div>
       <div className="app__widget">
         {envelope ? (
-          <WidgetTemplate config={envelope.uiConfig} data={data} onEvent={handleEvent} />
+          <ColumnChart config={envelope.uiConfig} data={data} onEvent={handleEvent} />
         ) : (
           <div className="app__empty">
             <p className="BodyMediumRegular">Configure the widget in the left panel to preview it here.</p>

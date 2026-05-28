@@ -1,15 +1,23 @@
-import { WidgetTemplateEnvelope, WidgetTemplateUIConfig, DataEntry, SeriesPayload, Duration } from './types';
+import { ColumnChartEnvelope, ColumnChartUIConfig, DataEntry, SeriesPayload, Duration } from './types';
 import { resolveAndCompute } from './api';
+
+// Maps widget periodicity values → timeFrame string expected by resolveAndCompute
+const PERIODICITY_TIME_FRAME: Record<string, string> = {
+  hourly:  'hour',
+  daily:   'day',
+  weekly:  'week',
+  monthly: 'month',
+};
 
 interface MiniEngineCtx {
   authentication: string;
-  override?: { startTime: number; endTime: number };
+  override?: { startTime: number; endTime: number; periodicity?: string };
 }
 
 export async function resolve(
-  envelope: WidgetTemplateEnvelope,
+  envelope: ColumnChartEnvelope,
   ctx: MiniEngineCtx,
-): Promise<{ config: WidgetTemplateUIConfig; data: DataEntry[] }> {
+): Promise<{ config: ColumnChartUIConfig; data: DataEntry[] }> {
   const { startTime, endTime } = computeWindow(envelope, ctx.override);
   const bindings = envelope.dynamicBindingPathList ?? [];
 
@@ -34,6 +42,10 @@ export async function resolve(
   }
 
   try {
+    const timeFrame = ctx.override?.periodicity
+      ? PERIODICITY_TIME_FRAME[ctx.override.periodicity.toLowerCase()]
+      : undefined;
+
     const items = await resolveAndCompute(
       ctx.authentication,
       validBindings.map((binding) =>
@@ -43,6 +55,7 @@ export async function resolve(
       ),
       startTime,
       endTime,
+      timeFrame,
     );
     const data: DataEntry[] = items.map((item) => ({ key: item.key, value: item.value }));
     return { config: envelope.uiConfig, data };
@@ -62,7 +75,7 @@ export function getSeriesData(key: string, data: DataEntry[]): SeriesPayload | n
 }
 
 function computeWindow(
-  envelope: WidgetTemplateEnvelope,
+  envelope: ColumnChartEnvelope,
   override?: { startTime: number; endTime: number },
 ): { startTime: number; endTime: number } {
   if (override) return override;

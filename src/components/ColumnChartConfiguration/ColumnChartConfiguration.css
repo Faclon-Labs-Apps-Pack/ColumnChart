@@ -1,0 +1,160 @@
+/* ColumnChartConfiguration styles */
+
+.cc-config {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  overflow: hidden;
+}
+
+.cc-config__tab-content {
+  flex: 1;
+  overflow-y: auto;
+}
+
+/* Chart Settings standalone section (no accordion) */
+.cc-config__chart-settings {
+  display: flex;
+  flex-direction: column;
+  gap: var(--spacing-04, 12px);
+  padding: var(--spacing-04, 12px) var(--spacing-05, 16px);
+  border-bottom: 1px solid var(--border-gray-subtle, #f0f0f0);
+}
+
+.cc-config__chart-settings-heading {
+  margin: 0;
+  color: var(--text-default-primary, #1a1a1a);
+}
+
+/* Section body inside Accordion items */
+.cc-config__section {
+  width: 100%;
+  box-sizing: border-box;
+  display: flex;
+  flex-direction: column;
+  gap: var(--spacing-04, 12px);
+}
+
+.cc-config__empty-hint {
+  color: var(--text-default-tertiary, #aaa);
+  margin: 0;
+  font-style: italic;
+}
+
+
+/* Inline card (PlotLine, PlotBand, Stack) */
+.cc-config__inline-card {
+  display: flex;
+  flex-direction: column;
+  gap: var(--spacing-03, 8px);
+  padding: var(--spacing-04, 12px);
+  border: 1px solid var(--border-gray-subtle, #e8e8e8);
+  border-radius: var(--global-border-radius-medium, 6px);
+  background: var(--background-default-subtle, #fafafa);
+}
+
+.cc-config__inline-card-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.cc-config__two-col {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: var(--spacing-03, 8px);
+}
+
+/* Stack item */
+.cc-config__stack-item {
+  display: flex;
+  flex-direction: column;
+  gap: var(--spacing-03, 8px);
+  padding: var(--spacing-04, 12px);
+  border: 1px solid var(--border-gray-subtle, #e8e8e8);
+  border-radius: var(--global-border-radius-medium, 6px);
+  background: var(--background-default-subtle, #fafafa);
+}
+
+.cc-config__stack-header {
+  display: flex;
+  align-items: flex-end;
+  gap: var(--spacing-03, 8px);
+}
+
+.cc-config__stack-header > :first-child {
+  flex: 1;
+}
+
+/* Field row (label + switch) */
+.cc-config__field-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--spacing-03, 8px);
+}
+
+.cc-config__field-label {
+  color: var(--text-default-secondary, #555);
+}
+
+/* Time tab padding */
+.cc-config__time-tab {
+  padding: var(--spacing-04, 12px) var(--spacing-05, 16px);
+}
+
+/* Add/Edit series modal */
+.cc-series-modal .fds-modal {
+  width: 300px;
+}
+
+.cc-series-modal__body {
+  display: flex;
+  flex-direction: column;
+  gap: var(--spacing-04, 12px);
+}
+
+.cc-series-modal__two-col {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: var(--spacing-03, 8px);
+}
+
+/* Dropdown row: SelectInput + delete icon */
+.cc-config__chart-selector {
+  display: flex;
+  align-items: flex-end;
+  gap: var(--spacing-03, 8px);
+  padding: var(--spacing-04, 12px) var(--spacing-05, 16px);
+  border-bottom: 1px solid var(--border-gray-subtle, #f0f0f0);
+}
+
+.cc-config__chart-selector-input {
+  flex: 1;
+  min-width: 0;
+}
+
+/* Chart title input separating the selector from the sections */
+.cc-config__chart-title-field {
+  padding: var(--spacing-04, 12px) var(--spacing-05, 16px);
+  border-bottom: 1px solid var(--border-gray-subtle, #f0f0f0);
+}
+
+/* Bottom footer with Add Chart button */
+.cc-config__footer {
+  flex-shrink: 0;
+  padding: var(--spacing-04, 12px) var(--spacing-05, 16px);
+  border-top: 1px solid var(--border-gray-subtle, #f0f0f0);
+  background: var(--background-default-primary, #fff);
+}
+
+.cc-config__footer > * {
+  width: 100%;
+}
+
+/* The UNS dropdown renders via createPortal at document.body with z-index 100
+   (--global-z-index-dropdown). The modal backdrop sits at z-index 300
+   (--global-z-index-overlay). Force the dropdown above the modal. */
+.fds-uns-path-input__popover {
+  z-index: 500 !important;
+}
