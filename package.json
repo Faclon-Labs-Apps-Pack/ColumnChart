@@ -10,8 +10,8 @@
     "deploy": "claude /deploy-review"
   },
   "dependencies": {
-    "@faclon-labs/design-sdk": "latest",
-    "highcharts": "12.5.0",
+    "@faclon-labs/design-sdk": "^0.6.5",
+    "highcharts": "^12.6.0",
     "highcharts-react-official": "^3.2.3",
     "react": "18.2.0",
     "react-dom": "18.2.0",

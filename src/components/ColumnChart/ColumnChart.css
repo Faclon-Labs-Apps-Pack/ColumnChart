@@ -1,5 +1,47 @@
 /* ColumnChart widget styles */
 
+.cc-widget-shell {
+  width: 100%;
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  --cc-widget-title-font-size: 18px;
+  --cc-widget-title-color: var(--text-default-primary, #1a1a1a);
+  --cc-widget-title-weight: 600;
+}
+
+/* Make the ChartSwitcher (fds-chart) fill the shell instead of growing to
+   its content height, so the chart fits within the parent wrapper. */
+.cc-widget-shell > .fds-chart {
+  flex: 1 1 auto;
+  height: 100%;
+  min-height: 0;
+}
+
+/* The SDK canvas hard-codes min-height: 360px which forces overflow in
+   short parents. Let it shrink and fill the remaining vertical space. */
+.cc-widget-shell .fds-chart__canvas {
+  flex: 1 1 auto;
+  min-height: 0;
+}
+
+/* Advanced-settings title styling. The visible title text lives in the
+   prefix + label spans, which carry the .HeadingSmallSemibold class that
+   sets font-size/weight on themselves — so styling the container has no
+   effect. Target the spans directly, and gate behind --title-styled so the
+   SDK's default heading is preserved when advanced settings are off. */
+.cc-widget-shell--title-styled .fds-chart-switcher__prefix,
+.cc-widget-shell--title-styled .fds-chart__title-label {
+  font-size: var(--cc-widget-title-font-size);
+  color: var(--cc-widget-title-color);
+  font-weight: var(--cc-widget-title-weight);
+}
+
+.cc-widget--hide-title .fds-chart-switcher__title {
+  display: none;
+}
+
 .cc-widget {
   width: 100%;
   height: 100%;

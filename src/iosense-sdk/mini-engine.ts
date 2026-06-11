@@ -1,5 +1,6 @@
-import { ColumnChartEnvelope, ColumnChartUIConfig, DataEntry, SeriesPayload, Duration } from './types';
+import { ColumnChartEnvelope, ColumnChartUIConfig, DataEntry, SeriesPayload } from './types';
 import { resolveAndCompute } from './api';
+import { resolveDurationWindow } from './time';
 
 // Maps widget periodicity values → timeFrame string expected by resolveAndCompute
 const PERIODICITY_TIME_FRAME: Record<string, string> = {
@@ -57,8 +58,9 @@ export async function resolve(
       endTime,
       timeFrame,
     );
-    const data: DataEntry[] = items.map((item) => ({ key: item.key, value: item.value }));
-    return { config: envelope.uiConfig, data };
+    // Pass resolveAndCompute items through AS-IS (raw shape) — same as the
+    // production Lens Data Engine. No reshaping/wrapping here.
+    return { config: envelope.uiConfig, data: items };
   } catch {
     return { config: envelope.uiConfig, data: [] };
   }
@@ -67,6 +69,17 @@ export async function resolve(
 export function getSeriesData(key: string, data: DataEntry[]): SeriesPayload | null {
   const entry = data.find((d) => d.key === key);
   if (!entry) return null;
+  // Raw API item: series fields live at the top level of the entry.
+  if (Array.isArray(entry.slots)) {
+    return {
+      __type: 'series',
+      path: entry.path ?? '',
+      meta: entry.meta as SeriesPayload['meta'],
+      range: entry.range ?? { from: 0, to: 0 },
+      slots: entry.slots,
+    };
+  }
+  // Backward-compat: wrapped DataEntry where value is a SeriesPayload.
   const v = entry.value;
   if (v !== null && typeof v === 'object' && (v as SeriesPayload).__type === 'series') {
     return v as SeriesPayload;
@@ -81,24 +94,16 @@ function computeWindow(
   if (override) return override;
   const { timeConfig } = envelope;
   if (!timeConfig) return { startTime: Date.now() - 86_400_000, endTime: Date.now() };
+  const now = Date.now();
+  // Fixed picker: resolve its single "set duration" (x/xEvent/xPeriod + y…).
+  if (timeConfig.pickerType === 'fixed' && timeConfig.fixedDuration) {
+    return resolveDurationWindow(timeConfig.fixedDuration, now, timeConfig.cycleTime);
+  }
+  // Legacy absolute fixed window.
   if (timeConfig.type === 'fixed' && timeConfig.startTime && timeConfig.endTime) {
     return { startTime: timeConfig.startTime, endTime: timeConfig.endTime };
   }
-  const now = Date.now();
   const dur = timeConfig.allDurations?.find((d) => d.id === timeConfig.defaultDurationId);
-  if (dur) return { startTime: computePresetStart(dur, now), endTime: now };
+  if (dur) return resolveDurationWindow(dur, now, timeConfig.cycleTime);
   return { startTime: now - 86_400_000, endTime: now };
-}
-
-function computePresetStart(dur: Duration, now: number): number {
-  const x = dur.x ?? 1;
-  const periodMs: Record<string, number> = {
-    minute: 60_000,
-    hour: 3_600_000,
-    day: 86_400_000,
-    week: 7 * 86_400_000,
-    month: 30 * 86_400_000,
-    year: 365 * 86_400_000,
-  };
-  return now - x * (periodMs[dur.xPeriod] ?? 86_400_000);
 }

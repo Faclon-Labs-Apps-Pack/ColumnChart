@@ -29,6 +29,10 @@ body {
   flex: 1;
   min-width: 0;
   height: 100%;
+  overflow: auto;
+  display: flex;
+  align-items: flex-start;
+  justify-content: flex-start;
 }
 
 .app__empty {

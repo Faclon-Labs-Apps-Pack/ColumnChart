@@ -7,7 +7,7 @@ import { Button } from '@faclon-labs/design-sdk/Button';
 import { IconButton } from '@faclon-labs/design-sdk/IconButton';
 import { Modal, ModalHeader, ModalBody, ModalFooter } from '@faclon-labs/design-sdk/Modal';
 import { TimeTabConfiguration } from '@faclon-labs/design-sdk/TimeTabConfiguration';
-import type { TimeTabUIConfig } from '@faclon-labs/design-sdk/TimeTabConfiguration';
+import type { TimeTabUIConfig, TimeTabConfigurationProps } from '@faclon-labs/design-sdk/TimeTabConfiguration';
 import { UNSPathInput } from '@faclon-labs/design-sdk/UNSPathInput';
 import { SelectInput } from '@faclon-labs/design-sdk/SelectInput';
 import { DropdownMenu, ActionListItem, ActionListItemGroup } from '@faclon-labs/design-sdk/DropdownMenu';
@@ -17,6 +17,8 @@ import { Radio, RadioGroup } from '@faclon-labs/design-sdk/Radio';
 import type { RadioGroupChangeMeta } from '@faclon-labs/design-sdk/Radio';
 import { ListCard, ListCardLeadingItem, ListCardTrailingItem } from '@faclon-labs/design-sdk/ListCard';
 import { Tag } from '@faclon-labs/design-sdk/Tag';
+import { Badge } from '@faclon-labs/design-sdk/Badge';
+import { Checkbox, CheckboxGroup } from '@faclon-labs/design-sdk/Checkbox';
 import { Edit2, Trash2, Plus, ArrowLeft, Lock, Unlock } from 'react-feather';
 import {
   ColumnChartEnvelope,
@@ -31,6 +33,8 @@ import {
   StackConfig,
   WidgetSizeConfig,
   WidgetSizePreset,
+  WidgetElementsConfig,
+  WidgetAdvancedSettingsConfig,
   TimeConfig,
   Duration,
   BindingEntry,
@@ -49,6 +53,12 @@ interface ColumnChartConfigurationProps {
   isLoadingTree?: boolean;
   onLoadWorkspaces?: () => void;
   resolveUNSValue?: (rawValue: string) => string;
+
+  // Registered global time pickers, injected by the host (Lens). Passed
+  // straight through to design-sdk's TimeTabConfiguration so the user can
+  // link the widget's time to a Global Time Picker. Type is derived from the
+  // component's own props since the SDK doesn't re-export GTPGlobalTimepicker.
+  globalTimepickers?: TimeTabConfigurationProps['globalTimepickers'];
 }
 
 const VARIABLE_REGEX = /^\{\{(.+)\}\}$/;
@@ -56,6 +66,19 @@ const WIDGET_SIZE_PRESETS: Record<Exclude<WidgetSizePreset, 'Custom'>, { width: 
   Small: { width: 580, height: 400 },
   Medium: { width: 880, height: 400 },
   Large: { width: 1780, height: 440 },
+};
+
+const DEFAULT_ADVANCED_SETTINGS: WidgetAdvancedSettingsConfig = {
+  enabled: true,
+  titleFontSize: 20,
+  titleFontColor: 'var(--text-default-primary, #1a1a1a)',
+  titleFontWeight: 'Semi-Bold',
+  xAxisTextColor: 'var(--text-default-primary, #1a1a1a)',
+  xAxisLineColor: '#333333',
+  yAxisTextColor: 'var(--text-default-primary, #1a1a1a)',
+  yAxisLineColor: '#333333',
+  gridLineColor: '#CCCCCC',
+  legendTextColor: 'var(--text-default-primary, #1a1a1a)',
 };
 
 function getWidgetSizeDimensions(preset: WidgetSizePreset): { width: number; height: number } {
@@ -100,15 +123,68 @@ function buildDynamicBindingPathList(
 }
 
 function mapTimeTabToTimeConfig(ttc: TimeTabUIConfig): TimeConfig {
+  // New design uses `linkTimeWith` ('local' | 'fixed' | 'global'); fall back to
+  // the deprecated `timeType` for back-compat.
+  const picker = ((ttc.linkTimeWith ?? ttc.timeType ?? 'local') as 'local' | 'fixed' | 'global');
+
+  // Fixed picker carries a single inline "set duration" (ttc.fixed.duration)
+  // with string x/y. Convert to a Duration the engine/widget can resolve.
+  const fd = ttc.fixed?.duration;
+  const fixedDuration: Duration | undefined =
+    picker === 'fixed' && fd
+      ? {
+          id: 'fixed',
+          label: fd.name || 'Fixed',
+          navigation: fd.navigation,
+          x: Number(fd.x) || 0,
+          xPeriod: fd.xPeriod,
+          xEvent: fd.xEvent,
+          y: Number(fd.y) || 0,
+          yPeriod: fd.yPeriod,
+          yEvent: fd.yEvent,
+        }
+      : undefined;
+
+  // Cycle time redefines when each period "begins" so durations resolve to the
+  // operational window, not the calendar one (hour:minute = day, dayOfWeek =
+  // week, date = month, month NAME = year). The resolver reads these raw fields
+  // directly (mirroring the GlobalTimePicker reference), so pass them through
+  // unchanged. Fixed picker scopes cycleTime under `fixed`; local/global keep it
+  // at the top level.
+  const cycleTime = (picker === 'fixed' ? ttc.fixed?.cycleTime : ttc.cycleTime) as
+    | TimeConfig['cycleTime']
+    | undefined;
+
   return {
     timezone: ttc.timezone,
-    type: ttc.timeType === 'global' ? 'local' : (ttc.timeType ?? 'local'),
+    // Engine still treats global like local (rolling) for data resolution,
+    // but the real picker mode is preserved in `pickerType` for the widget UI.
+    type: picker === 'global' ? 'local' : picker,
+    pickerType: picker,
+    cycleTime,
     startTime: null,
     endTime: null,
+    fixedDuration,
     defaultDurationId: ttc.defaultDurationId,
     allDurations: (ttc.allDurations ?? []) as unknown as Duration[],
-    defaultPeriodicity: ttc.defaultPeriodicity,
+    // Fixed picker has its own single periodicity; otherwise use the tab default.
+    defaultPeriodicity: (picker === 'fixed' && fd?.periodicity
+      ? fd.periodicity.toLowerCase()
+      : ttc.defaultPeriodicity) as TimeConfig['defaultPeriodicity'],
   };
+}
+
+// Debug helper — surfaces exactly what TimeTab emits vs what we derive.
+function logTimeConfig(ttc: TimeTabUIConfig, tc: TimeConfig) {
+  // eslint-disable-next-line no-console
+  console.log('[mapTimeTabToTimeConfig]', {
+    ttc_linkTimeWith: (ttc as { linkTimeWith?: string }).linkTimeWith,
+    ttc_cycleTime: ttc.cycleTime,
+    ttc_fixed: (ttc as { fixed?: unknown }).fixed,
+    ttc_defaultDurationId: ttc.defaultDurationId,
+    ttc_allDurations: ttc.allDurations,
+    derived: tc,
+  });
 }
 
 function buildEnvelope(
@@ -169,7 +245,7 @@ export function ColumnChartConfiguration(props: ColumnChartConfigurationProps) {
   const [activeTab, setActiveTab] = useState<ActiveTab>('data');
 
   // ── Charts list + which one is selected in the dropdown ──────────────────
-  const initCharts = config?.uiConfig.charts?.length ? config.uiConfig.charts : [makeDefaultChart()];
+  const initCharts = config?.uiConfig?.charts?.length ? config.uiConfig.charts : [makeDefaultChart()];
   const [chartsList,       setChartsList]       = useState<ChartConfig[]>(initCharts);
   const [selectedChartId,  setSelectedChartId]  = useState<string | null>(initCharts[0]._id);
   const [chartPickerOpen,  setChartPickerOpen]  = useState(false);
@@ -180,16 +256,16 @@ export function ColumnChartConfiguration(props: ColumnChartConfigurationProps) {
   // ── Widget-level state ────────────────────────────────────────────────────
   const [currentTimeConfig,    setCurrentTimeConfig]    = useState<TimeConfig | undefined>(config?.timeConfig);
   const [currentTimeTabConfig, setCurrentTimeTabConfig] = useState<Record<string, unknown> | undefined>(config?.timeTabConfig);
-  const [title,          setTitle]          = useState(config?.uiConfig.title ?? '');
-  const [description,    setDescription]    = useState(config?.uiConfig.description ?? '');
+  const [title,          setTitle]          = useState(config?.uiConfig?.title ?? '');
+  const [description,    setDescription]    = useState(config?.uiConfig?.description ?? '');
   const [titleTouched,   setTitleTouched]   = useState(false);
-  const [wrapInCard,     setWrapInCard]     = useState(config?.uiConfig.style.card.wrapInCard ?? true);
-  const [stacked,        setStacked]        = useState(config?.uiConfig.style.stacked ?? false);
-  const [showLegend,     setShowLegend]     = useState(config?.uiConfig.style.showLegend ?? true);
-  const [showDataLabels, setShowDataLabels] = useState(config?.uiConfig.style.showDataLabels ?? false);
-  const [yAxisUnit,      setYAxisUnit]      = useState(config?.uiConfig.style.yAxisUnit ?? '');
+  const [wrapInCard,     setWrapInCard]     = useState(config?.uiConfig?.style?.card?.wrapInCard ?? true);
+  const [stacked,        setStacked]        = useState(config?.uiConfig?.style?.stacked ?? false);
+  const [showLegend,     setShowLegend]     = useState(config?.uiConfig?.style?.showLegend ?? true);
+  const [showDataLabels, setShowDataLabels] = useState(config?.uiConfig?.style?.showDataLabels ?? false);
+  const [yAxisUnit,      setYAxisUnit]      = useState(config?.uiConfig?.style?.yAxisUnit ?? '');
   const [widgetSizePickerOpen, setWidgetSizePickerOpen] = useState(false);
-  const initialWidgetSize = config?.uiConfig.style.widgetSize ?? {
+  const initialWidgetSize = config?.uiConfig?.style?.widgetSize ?? {
     preset: 'Medium' as const,
     ...getWidgetSizeDimensions('Medium'),
     locked: false,
@@ -199,6 +275,22 @@ export function ColumnChartConfiguration(props: ColumnChartConfigurationProps) {
   const [widgetWidth,     setWidgetWidth]     = useState(String(initialWidgetSize.width));
   const [widgetHeight,    setWidgetHeight]    = useState(String(initialWidgetSize.height));
   const [widgetLocked,    setWidgetLocked]    = useState(Boolean(initialWidgetSize.locked));
+  const [widgetElementsEnabled, setWidgetElementsEnabled] = useState(
+    Boolean(
+      config?.uiConfig?.style?.widgetElements?.hideWidgetElements ||
+      config?.uiConfig?.style?.widgetElements?.hideSettingsIcon ||
+      config?.uiConfig?.style?.widgetElements?.hideExportIcon ||
+      config?.uiConfig?.style?.widgetElements?.hideChartTitle,
+    ),
+  );
+  const [hideSettingsIcon, setHideSettingsIcon] = useState(config?.uiConfig?.style?.widgetElements?.hideSettingsIcon ?? false);
+  const [hideExportIcon,   setHideExportIcon]   = useState(config?.uiConfig?.style?.widgetElements?.hideExportIcon ?? false);
+  const [hideChartTitle,   setHideChartTitle]   = useState(config?.uiConfig?.style?.widgetElements?.hideChartTitle ?? false);
+  const [advancedSettings, setAdvancedSettings] = useState<WidgetAdvancedSettingsConfig>({
+    ...DEFAULT_ADVANCED_SETTINGS,
+    ...(config?.uiConfig?.style?.advancedSettings ?? {}),
+  });
+  const [advancedTitleWeightOpen, setAdvancedTitleWeightOpen] = useState(false);
 
   // ── Modal state ───────────────────────────────────────────────────────────
   const configRef = useRef<HTMLDivElement>(null);
@@ -240,20 +332,25 @@ export function ColumnChartConfiguration(props: ColumnChartConfigurationProps) {
 
   useEffect(() => {
     if (config) {
-      const raw = config.uiConfig.charts ?? [];
-      const charts = raw.length > 0 ? raw : [makeDefaultChart()];
+      const raw = config.uiConfig?.charts ?? [];
+      let charts = raw.length > 0 ? raw : [makeDefaultChart()];
+      // Migrate legacy widget-level title onto the first chart if it has none.
+      const firstTitle = charts[0]?.title || config.uiConfig?.title || '';
+      if (charts[0] && !charts[0].title && firstTitle) {
+        charts = charts.map((c, i) => (i === 0 ? { ...c, title: firstTitle } : c));
+      }
       setChartsList(charts);
       setSelectedChartId(charts[0]._id);
-      setTitle(config.uiConfig.title ?? '');
-      setDescription(config.uiConfig.description ?? '');
+      setTitle(charts[0]?.title ?? '');
+      setDescription(config.uiConfig?.description ?? '');
       setTitleTouched(false);
-      setWrapInCard(config.uiConfig.style.card.wrapInCard);
-      setStacked(config.uiConfig.style.stacked);
-      setShowLegend(config.uiConfig.style.showLegend);
-      setShowDataLabels(config.uiConfig.style.showDataLabels);
-      setYAxisUnit(config.uiConfig.style.yAxisUnit ?? '');
+      setWrapInCard(config.uiConfig?.style?.card?.wrapInCard ?? true);
+      setStacked(config.uiConfig?.style?.stacked ?? false);
+      setShowLegend(config.uiConfig?.style?.showLegend ?? true);
+      setShowDataLabels(config.uiConfig?.style?.showDataLabels ?? false);
+      setYAxisUnit(config.uiConfig?.style?.yAxisUnit ?? '');
       setWidgetSizePickerOpen(false);
-      const nextWidgetSize = config.uiConfig.style.widgetSize ?? {
+      const nextWidgetSize = config.uiConfig?.style?.widgetSize ?? {
         preset: 'Medium' as const,
         ...getWidgetSizeDimensions('Medium'),
         locked: false,
@@ -262,6 +359,26 @@ export function ColumnChartConfiguration(props: ColumnChartConfigurationProps) {
       setWidgetWidth(String(nextWidgetSize.width));
       setWidgetHeight(String(nextWidgetSize.height));
       setWidgetLocked(Boolean(nextWidgetSize.locked));
+      const nextWidgetElements = config.uiConfig?.style?.widgetElements ?? {
+        hideWidgetElements: false,
+        hideSettingsIcon: false,
+        hideExportIcon: false,
+        hideChartTitle: false,
+      };
+      setWidgetElementsEnabled(
+        nextWidgetElements.hideWidgetElements ||
+        nextWidgetElements.hideSettingsIcon ||
+        nextWidgetElements.hideExportIcon ||
+        nextWidgetElements.hideChartTitle,
+      );
+      setHideSettingsIcon(nextWidgetElements.hideSettingsIcon);
+      setHideExportIcon(nextWidgetElements.hideExportIcon);
+      setHideChartTitle(nextWidgetElements.hideChartTitle);
+      setAdvancedSettings({
+        ...DEFAULT_ADVANCED_SETTINGS,
+        ...(config.uiConfig?.style?.advancedSettings ?? {}),
+      });
+      setAdvancedTitleWeightOpen(false);
       setCurrentTimeConfig(config.timeConfig);
       setCurrentTimeTabConfig(config.timeTabConfig);
     }
@@ -279,6 +396,8 @@ export function ColumnChartConfiguration(props: ColumnChartConfigurationProps) {
     showDataLabels?: boolean;
     yAxisUnit?: string;
     widgetSize?: WidgetSizeConfig;
+    widgetElements?: WidgetElementsConfig;
+    advancedSettings?: WidgetAdvancedSettingsConfig;
   }): ColumnChartUIConfig {
     return {
       title:       overrides.title       ?? title,
@@ -296,6 +415,13 @@ export function ColumnChartConfiguration(props: ColumnChartConfigurationProps) {
           height: Number(widgetHeight) || getWidgetSizeDimensions(widgetSizePreset).height,
           locked: widgetLocked,
         },
+        widgetElements: overrides.widgetElements ?? {
+          hideWidgetElements: hideSettingsIcon || hideExportIcon || hideChartTitle,
+          hideSettingsIcon,
+          hideExportIcon,
+          hideChartTitle,
+        },
+        advancedSettings: overrides.advancedSettings ?? advancedSettings,
       },
     };
   }
@@ -387,6 +513,40 @@ export function ColumnChartConfiguration(props: ColumnChartConfigurationProps) {
     });
   }
 
+  function updateWidgetElements(patch: Partial<WidgetElementsConfig>) {
+    const next = {
+      hideWidgetElements: widgetElementsEnabled,
+      hideSettingsIcon,
+      hideExportIcon,
+      hideChartTitle,
+      ...patch,
+    };
+    const nextHideWidgetElements =
+      next.hideWidgetElements ||
+      next.hideSettingsIcon ||
+      next.hideExportIcon ||
+      next.hideChartTitle;
+    if ('hideSettingsIcon' in patch) setHideSettingsIcon(next.hideSettingsIcon);
+    if ('hideExportIcon' in patch) setHideExportIcon(next.hideExportIcon);
+    if ('hideChartTitle' in patch) setHideChartTitle(next.hideChartTitle);
+    setWidgetElementsEnabled(nextHideWidgetElements);
+    emit({ widgetElements: {
+      hideWidgetElements: nextHideWidgetElements,
+      hideSettingsIcon: next.hideSettingsIcon,
+      hideExportIcon: next.hideExportIcon,
+      hideChartTitle: next.hideChartTitle,
+    }});
+  }
+
+  function updateAdvancedSettings(patch: Partial<WidgetAdvancedSettingsConfig>) {
+    const next = {
+      ...advancedSettings,
+      ...patch,
+    };
+    setAdvancedSettings(next);
+    emit({ advancedSettings: next });
+  }
+
   function emit(
     uiOverrides: Parameters<typeof buildUiConfig>[0] = {},
     timeOverride?: { timeConfig?: TimeConfig; timeTabConfig?: Record<string, unknown> },
@@ -418,6 +578,8 @@ export function ColumnChartConfiguration(props: ColumnChartConfigurationProps) {
     setSelectedChartId(chartId);
     setChartPickerOpen(false);
     setExpandedSections({});
+    const chart = chartsList.find((c) => c._id === chartId);
+    setTitle(chart?.title ?? '');
   }
 
   // ── Chart CRUD ────────────────────────────────────────────────────────────
@@ -703,6 +865,7 @@ export function ColumnChartConfiguration(props: ColumnChartConfigurationProps) {
 
   function handleTimeChange(ttc: TimeTabUIConfig) {
     const tc     = mapTimeTabToTimeConfig(ttc);
+    logTimeConfig(ttc, tc);
     const ttcRaw = ttc as unknown as Record<string, unknown>;
     setCurrentTimeConfig(tc);
     setCurrentTimeTabConfig(ttcRaw);
@@ -756,7 +919,11 @@ export function ColumnChartConfiguration(props: ColumnChartConfigurationProps) {
                 errorText="Chart title is required"
                 onChange={({ value }) => {
                   setTitle(value);
-                  emit({ title: value });
+                  const nextCharts = chartsList.map((c) =>
+                    c._id === selectedChartId ? { ...c, title: value } : c,
+                  );
+                  setChartsList(nextCharts);
+                  emit({ title: value, charts: nextCharts });
                   if (showChartValidation) { setShowChartValidation(false); setAddChartError(''); }
                 }}
                 onBlur={() => setTitleTouched(true)}
@@ -790,7 +957,7 @@ export function ColumnChartConfiguration(props: ColumnChartConfigurationProps) {
                           {chartsList.map((chart, i) => (
                             <ActionListItem
                               key={chart._id}
-                              title={`Chart ${i + 1}`}
+                              title={chart.title || `Chart ${i + 1}`}
                               selectionType="Single"
                               isSelected={selectedChartId === chart._id}
                               onClick={() => selectChart(chart._id)}
@@ -817,6 +984,9 @@ export function ColumnChartConfiguration(props: ColumnChartConfigurationProps) {
                 {/* Data Source */}
                 <ProductAccordionItem
                   title="Data Source"
+                  trailingIcon={selectedChart.series.length > 0
+                    ? <Badge color="Neutral" emphasis="Subtle" size="Small" label={String(selectedChart.series.length)} />
+                    : undefined}
                   isExpanded={isSectionOpen('series')}
                   onToggle={() => toggleSection('series')}
                   headerAction={
@@ -852,6 +1022,9 @@ export function ColumnChartConfiguration(props: ColumnChartConfigurationProps) {
                 {/* Fixed Series */}
                 <ProductAccordionItem
                   title="Fixed Series"
+                  trailingIcon={selectedChart.fixedSeries.length > 0
+                    ? <Badge color="Neutral" emphasis="Subtle" size="Small" label={String(selectedChart.fixedSeries.length)} />
+                    : undefined}
                   isExpanded={isSectionOpen('fixed')}
                   onToggle={() => toggleSection('fixed')}
                   headerAction={
@@ -886,6 +1059,9 @@ export function ColumnChartConfiguration(props: ColumnChartConfigurationProps) {
                 {/* Axis */}
                 <ProductAccordionItem
                   title="Axis"
+                  trailingIcon={(selectedChart.axes ?? []).length > 0
+                    ? <Badge color="Neutral" emphasis="Subtle" size="Small" label={String((selectedChart.axes ?? []).length)} />
+                    : undefined}
                   isExpanded={isSectionOpen('axis')}
                   onToggle={() => toggleSection('axis')}
                   headerAction={
@@ -948,6 +1124,9 @@ export function ColumnChartConfiguration(props: ColumnChartConfigurationProps) {
                 {/* Stack */}
                 <ProductAccordionItem
                   title="Stack"
+                  trailingIcon={selectedChart.stacks.length > 0
+                    ? <Badge color="Neutral" emphasis="Subtle" size="Small" label={String(selectedChart.stacks.length)} />
+                    : undefined}
                   isExpanded={isSectionOpen('stack')}
                   onToggle={() => toggleSection('stack')}
                   headerAction={
@@ -982,6 +1161,9 @@ export function ColumnChartConfiguration(props: ColumnChartConfigurationProps) {
                 {/* Plot Lines */}
                 <ProductAccordionItem
                   title="Plot Lines"
+                  trailingIcon={selectedChart.plotLines.length > 0
+                    ? <Badge color="Neutral" emphasis="Subtle" size="Small" label={String(selectedChart.plotLines.length)} />
+                    : undefined}
                   isExpanded={isSectionOpen('plotLine')}
                   onToggle={() => toggleSection('plotLine')}
                   headerAction={
@@ -1014,6 +1196,9 @@ export function ColumnChartConfiguration(props: ColumnChartConfigurationProps) {
                 {/* Plot Bands */}
                 <ProductAccordionItem
                   title="Plot Bands"
+                  trailingIcon={selectedChart.plotBands.length > 0
+                    ? <Badge color="Neutral" emphasis="Subtle" size="Small" label={String(selectedChart.plotBands.length)} />
+                    : undefined}
                   isExpanded={isSectionOpen('plotBand')}
                   onToggle={() => toggleSection('plotBand')}
                   headerAction={
@@ -1052,6 +1237,7 @@ export function ColumnChartConfiguration(props: ColumnChartConfigurationProps) {
             <TimeTabConfiguration
               onChange={handleTimeChange}
               value={currentTimeTabConfig as Partial<TimeTabUIConfig> | undefined}
+              globalTimepickers={props.globalTimepickers}
             />
           </div>
         )}
@@ -1177,6 +1363,149 @@ export function ColumnChartConfiguration(props: ColumnChartConfigurationProps) {
                 </div>
               </div>
             </ProductAccordionItem>
+
+            <div className="cc-config__widget-elements-section">
+              <div className="cc-config__field-row">
+                <span className="SmallSemibold cc-config__field-label">Hide Widget elements</span>
+              </div>
+              <CheckboxGroup
+                label=""
+                orientation="Vertical"
+                className="cc-config__widget-elements-group"
+              >
+                <Checkbox
+                  label="Settings Icons"
+                  isChecked={hideSettingsIcon}
+                  onChange={() => updateWidgetElements({ hideSettingsIcon: !hideSettingsIcon })}
+                />
+                <Checkbox
+                  label="Export Icon"
+                  isChecked={hideExportIcon}
+                  onChange={() => updateWidgetElements({ hideExportIcon: !hideExportIcon })}
+                />
+                <Checkbox
+                  label="Chart Title"
+                  isChecked={hideChartTitle}
+                  onChange={() => updateWidgetElements({ hideChartTitle: !hideChartTitle })}
+                />
+              </CheckboxGroup>
+            </div>
+
+            <div className="cc-config__advanced-section">
+              <div className="cc-config__field-row">
+                <span className="SmallSemibold cc-config__field-label cc-config__field-label--bold">Advanced Settings</span>
+                <Switch
+                  accessibilityLabel="Advanced Settings"
+                  isChecked={advancedSettings.enabled}
+                  onChange={({ isChecked }) => updateAdvancedSettings({ enabled: isChecked })}
+                />
+              </div>
+
+              {advancedSettings.enabled && (
+                <div className="cc-config__advanced-body">
+                  <p className="LabelMediumDefault cc-config__advanced-heading">Chart Title</p>
+                  <TextInput
+                    label="Title Font Size"
+                    type="number"
+                    placeholder="20"
+                    value={String(advancedSettings.titleFontSize)}
+                    onChange={({ value }) => {
+                      const parsed = Number(value);
+                      updateAdvancedSettings({
+                        titleFontSize: Number.isFinite(parsed) && parsed > 0 ? Math.round(parsed) : DEFAULT_ADVANCED_SETTINGS.titleFontSize,
+                      });
+                    }}
+                  />
+                  <div>
+                    <InputFieldHeader label="Title Font Color" />
+                    <ColorInput
+                      value={advancedSettings.titleFontColor}
+                      onChange={(value) => updateAdvancedSettings({ titleFontColor: value })}
+                    />
+                  </div>
+                  <SelectInput
+                    label="Title Font Weight"
+                    placeholder="Select weight"
+                    value={advancedSettings.titleFontWeight}
+                    isOpen={advancedTitleWeightOpen}
+                    onClick={() => setAdvancedTitleWeightOpen((v) => !v)}
+                  >
+                    {advancedTitleWeightOpen && (
+                      <DropdownMenu>
+                        <ActionListItemGroup>
+                          {(['Regular', 'Medium', 'Semi-Bold', 'Bold'] as const).map((weight) => (
+                            <ActionListItem
+                              key={weight}
+                              title={weight}
+                              selectionType="Single"
+                              isSelected={advancedSettings.titleFontWeight === weight}
+                              onClick={() => {
+                                updateAdvancedSettings({ titleFontWeight: weight });
+                                setAdvancedTitleWeightOpen(false);
+                              }}
+                            />
+                          ))}
+                        </ActionListItemGroup>
+                      </DropdownMenu>
+                    )}
+                  </SelectInput>
+
+                  <div className="cc-config__advanced-divider" />
+
+                  <p className="LabelMediumDefault cc-config__advanced-heading">X Axis</p>
+                  <div>
+                    <InputFieldHeader label="Axis Text Color" />
+                    <ColorInput
+                      value={advancedSettings.xAxisTextColor}
+                      onChange={(value) => updateAdvancedSettings({ xAxisTextColor: value })}
+                    />
+                  </div>
+                  <div>
+                    <InputFieldHeader label="Axis Line Color" />
+                    <ColorInput
+                      value={advancedSettings.xAxisLineColor}
+                      onChange={(value) => updateAdvancedSettings({ xAxisLineColor: value })}
+                    />
+                  </div>
+
+                  <div className="cc-config__advanced-divider" />
+
+                  <p className="LabelMediumDefault cc-config__advanced-heading">Y Axis</p>
+                  <div>
+                    <InputFieldHeader label="Axis Text Color" />
+                    <ColorInput
+                      value={advancedSettings.yAxisTextColor}
+                      onChange={(value) => updateAdvancedSettings({ yAxisTextColor: value })}
+                    />
+                  </div>
+                  <div>
+                    <InputFieldHeader label="Axis Line Color" />
+                    <ColorInput
+                      value={advancedSettings.yAxisLineColor}
+                      onChange={(value) => updateAdvancedSettings({ yAxisLineColor: value })}
+                    />
+                  </div>
+
+                  <div className="cc-config__advanced-divider" />
+
+                  <p className="LabelMediumDefault cc-config__advanced-heading">Others</p>
+                  <div>
+                    <InputFieldHeader label="Grid Line Color" />
+                    <ColorInput
+                      value={advancedSettings.gridLineColor}
+                      onChange={(value) => updateAdvancedSettings({ gridLineColor: value })}
+                    />
+                  </div>
+                  <div>
+                    <InputFieldHeader label="Legend Text Color" />
+                    <ColorInput
+                      value={advancedSettings.legendTextColor}
+                      onChange={(value) => updateAdvancedSettings({ legendTextColor: value })}
+                    />
+                  </div>
+                </div>
+              )}
+            </div>
           </>
         )}
 

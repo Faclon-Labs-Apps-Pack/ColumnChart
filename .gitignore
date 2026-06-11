@@ -3,3 +3,4 @@ dist/
 dist-bundle/
 .DS_Store
 *.local
+.aider*

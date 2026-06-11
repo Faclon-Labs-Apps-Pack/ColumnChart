@@ -7,9 +7,64 @@
   overflow: hidden;
 }
 
+.cc-config__header {
+  display: flex;
+  align-items: center;
+  gap: var(--spacing-03, 8px);
+  padding: var(--spacing-05, 16px);
+  border-bottom: 1px solid var(--border-gray-subtle, #f0f0f0);
+  flex-shrink: 0;
+}
+
+.cc-config__header-title {
+  color: var(--text-default-primary, #1a1a1a);
+}
+
 .cc-config__tab-content {
   flex: 1;
   overflow-y: auto;
+}
+
+.cc-config__style-top {
+  display: flex;
+  flex-direction: column;
+  gap: var(--spacing-04, 12px);
+  padding: var(--spacing-04, 12px) var(--spacing-05, 16px);
+  border-bottom: 1px solid var(--border-gray-subtle, #f0f0f0);
+}
+
+.cc-config__widget-elements-section {
+  display: flex;
+  flex-direction: column;
+  gap: var(--spacing-03, 8px);
+  padding: var(--spacing-04, 12px) var(--spacing-05, 16px);
+  border-bottom: 1px solid var(--border-gray-subtle, #f0f0f0);
+}
+
+.cc-config__advanced-section {
+  display: flex;
+  flex-direction: column;
+  gap: var(--spacing-04, 12px);
+  padding: var(--spacing-04, 12px) var(--spacing-05, 16px);
+  border-bottom: 1px solid var(--border-gray-subtle, #f0f0f0);
+}
+
+.cc-config__advanced-body {
+  display: flex;
+  flex-direction: column;
+  gap: var(--spacing-04, 12px);
+}
+
+.cc-config__advanced-heading {
+  margin: 0;
+  color: var(--text-default-primary, #1a1a1a);
+}
+
+.cc-config__advanced-divider {
+  height: 1px;
+  width: 100%;
+  background: var(--border-gray-subtle, #e8e8e8);
+  margin: var(--spacing-01, 4px) 0;
 }
 
 /* Chart Settings standalone section (no accordion) */
@@ -98,9 +153,31 @@
   color: var(--text-default-secondary, #555);
 }
 
+.cc-config__field-label--bold {
+  font-weight: 700;
+}
+
+.cc-config__widget-elements-group {
+  display: flex;
+  flex-direction: column;
+  gap: var(--spacing-02, 6px);
+  padding-left: var(--spacing-02, 6px);
+}
+
+/* Widget size row */
+.cc-style__widget-size-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) auto;
+  gap: var(--spacing-03, 8px);
+  align-items: center;
+}
+
+.cc-style__widget-size-row > :last-child {
+  align-self: center;
+}
+
 /* Time tab padding */
 .cc-config__time-tab {
-  padding: var(--spacing-04, 12px) var(--spacing-05, 16px);
 }
 
 /* Add/Edit series modal */
@@ -134,11 +211,6 @@
   min-width: 0;
 }
 
-/* Chart title input separating the selector from the sections */
-.cc-config__chart-title-field {
-  padding: var(--spacing-04, 12px) var(--spacing-05, 16px);
-  border-bottom: 1px solid var(--border-gray-subtle, #f0f0f0);
-}
 
 /* Bottom footer with Add Chart button */
 .cc-config__footer {
@@ -151,6 +223,30 @@
 .cc-config__footer > * {
   width: 100%;
 }
+
+/* Periodicity row: select + add button */
+.cc-periodicity-row {
+  display: flex;
+  align-items: flex-end;
+  gap: var(--spacing-03, 8px);
+}
+
+.cc-periodicity-row__select {
+  flex: 1;
+  min-width: 0;
+}
+
+.cc-periodicity-tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--spacing-02, 6px);
+}
+
+.cc-config__add-chart-error {
+  color: var(--text-feedback-negative, #dc2626);
+  margin: 0 0 var(--spacing-03, 8px);
+}
+
 
 /* The UNS dropdown renders via createPortal at document.body with z-index 100
    (--global-z-index-dropdown). The modal backdrop sits at z-index 300

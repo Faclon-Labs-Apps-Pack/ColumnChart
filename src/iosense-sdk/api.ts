@@ -1,11 +1,7 @@
-import { BindingEntry, SeriesPayload, SeriesMeta, SeriesSlot } from './types';
+import { BindingEntry, DataEntry } from './types';
 
 const STAGING_BASE = 'https://stagingsv.iosense.io/api';
 const GRAPH = 'iosense_test_uns';
-
-function isRawSeriesItem(item: Record<string, unknown>): boolean {
-  return Array.isArray(item.slots);
-}
 
 export async function validateSSOToken(ssoToken: string): Promise<string> {
   const res = await fetch(`${STAGING_BASE}/account/validateSSO`, {
@@ -23,7 +19,7 @@ export async function resolveAndCompute(
   startTime: number,
   endTime: number,
   timeFrame?: string,
-): Promise<Array<{ key: string; value: string | number | null | SeriesPayload }>> {
+): Promise<DataEntry[]> {
   const body: Record<string, unknown> = { graph: GRAPH, config, startTime, endTime };
   if (timeFrame) body.timeFrame = timeFrame;
   const res = await fetch(`${STAGING_BASE}/account/uns/resolveAndCompute`, {
@@ -35,22 +31,11 @@ export async function resolveAndCompute(
     body: JSON.stringify(body),
   });
   const json = await res.json();
-  const rawItems: Record<string, unknown>[] = json?.data ?? [];
-  return rawItems.map((item) => {
-    if (isRawSeriesItem(item)) {
-      return {
-        key: item.key as string,
-        value: {
-          __type: 'series' as const,
-          path: item.path as string,
-          meta: item.meta as SeriesMeta,
-          range: item.range as { from: number; to: number },
-          slots: item.slots as SeriesSlot[],
-        } satisfies SeriesPayload,
-      };
-    }
-    return { key: item.key as string, value: item.value as string | number | null };
-  });
+  // Pass the API items through AS-IS — no reshaping. This mirrors what the
+  // production Lens Data Engine hands the widget (series fields at the top
+  // level of each item, scalars as { key, value }). The widget's
+  // getSeriesData()/getValue() read this raw shape directly.
+  return (json?.data ?? []) as DataEntry[];
 }
 
 export async function fetchUNSNodes(
