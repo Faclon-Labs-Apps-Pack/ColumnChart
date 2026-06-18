@@ -1,0 +1,9 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(grep -oE \"[^}]{0,80}flex:[ ]*1 1 auto[^}]{0,80}\" /home/ubuntu/workspace/3c502490-8121-499c-be47-821fd2e71b95/dist-bundle/ColumnChart.bundle.css)",
+      "Bash(grep -aE 'fds-chart-switcher__title[^{]{0,80}\\\\{[^}]{0,200}' /home/ubuntu/workspace/3c502490-8121-499c-be47-821fd2e71b95/dist-bundle/ColumnChart.bundle.css)",
+      "Bash(awk '/flex:[[:space:]]*1 1 auto/ { context=NR; print \"Line\",NR\":\",$0 }' /home/ubuntu/workspace/3c502490-8121-499c-be47-821fd2e71b95/dist-bundle/ColumnChart.bundle.css)"
+    ]
+  }
+}

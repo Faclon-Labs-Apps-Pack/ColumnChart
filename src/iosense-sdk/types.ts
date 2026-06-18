@@ -202,6 +202,7 @@ export interface WidgetAdvancedSettingsConfig {
 export interface ChartConfig {
   _id: string;
   title: string;
+  description?: string;
   series: ColumnChartSeriesConfig[];
   fixedSeries: FixedSeriesConfig[];
   axes: AxisConfig[];
@@ -214,6 +215,7 @@ export interface ColumnChartUIConfig {
   title: string;
   description?: string;
   charts: ChartConfig[];
+  activeChartId?: string;
   style: {
     card: { wrapInCard: boolean; bg: string };
     stacked: boolean;

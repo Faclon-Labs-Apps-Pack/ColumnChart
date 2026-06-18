@@ -33,13 +33,33 @@
    SDK's default heading is preserved when advanced settings are off. */
 .cc-widget-shell--title-styled .fds-chart-switcher__prefix,
 .cc-widget-shell--title-styled .fds-chart__title-label {
-  font-size: var(--cc-widget-title-font-size);
+  font-size: var(--cc-widget-title-font-size) !important;
   color: var(--cc-widget-title-color);
-  font-weight: var(--cc-widget-title-weight);
+  font-weight: var(--cc-widget-title-weight) !important;
 }
 
 .cc-widget--hide-title .fds-chart-switcher__title {
   display: none;
+}
+
+/* Single-chart mode — keep the title visible but suppress the chevron icon
+   and the click affordance on the title button (so the empty dropdown
+   menu never opens). The user only sees the chart title as plain text. */
+.cc-widget--single-chart .fds-chart__title-icon {
+  display: none;
+}
+.cc-widget--single-chart .fds-chart__title {
+  cursor: default;
+  pointer-events: none;
+}
+
+/* SDK hard-caps the title label at max-width: 240px, which truncates with an
+   ellipsis even when there's free space in the header row. Lift the cap so
+   the label uses its natural text width — the title slot stays intrinsically
+   sized (no flex-grow), keeping the chevron icon next to the title text. */
+.cc-widget-shell .fds-chart__title-label {
+  max-width: none;
+  text-align: left;
 }
 
 .cc-widget {
@@ -57,6 +77,20 @@
   background: var(--background-default-intense, #fff);
   border-radius: var(--global-border-radius-large, 8px);
   border: 1px solid var(--border-gray-subtle, #e8e8e8);
+}
+
+/* Per-chart empty body — used when an item has no series. Center the SDK
+   EmptyState inside the area normally reserved for the chart canvas, so
+   the surrounding header (title + icons) still reads as the chart frame. */
+.cc-widget__empty-body {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 100%;
+  height: 100%;
+  min-height: 200px;
+  padding: var(--spacing-05, 16px);
+  box-sizing: border-box;
 }
 
 .cc-widget__empty-text {

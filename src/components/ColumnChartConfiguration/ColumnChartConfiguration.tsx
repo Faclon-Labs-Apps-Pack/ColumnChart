@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef } from 'react';
 import { Tabs, TabItem } from '@faclon-labs/design-sdk/Tabs';
-import { ProductAccordionItem } from '@faclon-labs/design-sdk/ProductAccordion';
+import { ProductAccordionItem, PATrailingItem } from '@faclon-labs/design-sdk/ProductAccordion';
 import { Switch } from '@faclon-labs/design-sdk/Switch';
 import { TextInput } from '@faclon-labs/design-sdk/TextInput';
 import { Button } from '@faclon-labs/design-sdk/Button';
@@ -19,6 +19,7 @@ import { ListCard, ListCardLeadingItem, ListCardTrailingItem } from '@faclon-lab
 import { Tag } from '@faclon-labs/design-sdk/Tag';
 import { Badge } from '@faclon-labs/design-sdk/Badge';
 import { Checkbox, CheckboxGroup } from '@faclon-labs/design-sdk/Checkbox';
+import { Tooltip } from '@faclon-labs/design-sdk/Tooltip';
 import { Edit2, Trash2, Plus, ArrowLeft, Lock, Unlock } from 'react-feather';
 import {
   ColumnChartEnvelope,
@@ -211,9 +212,71 @@ function buildEnvelope(
 type ActiveTab = 'data' | 'time' | 'style';
 type ModalSection = 'series' | 'fixed' | 'plotLine' | 'plotBand' | 'axis' | 'stack';
 
+// Per-section copy for the unified delete-confirm modal that opens when the
+// user clicks the trash icon on any row inside the configurator's accordions.
+type DeleteKind = 'series' | 'fixed' | 'axis' | 'stack' | 'plotLine' | 'plotBand';
+const DELETE_COPY: Record<DeleteKind, { title: string; body: string }> = {
+  series:   { title: 'Delete Data Source',  body: 'Are you sure you want to delete this data source? This action is irreversible.' },
+  fixed:    { title: 'Delete Fixed Series', body: 'Are you sure you want to delete this fixed series? This action is irreversible.' },
+  axis:     { title: 'Delete Axis',         body: 'Are you sure you want to delete this axis? This action is irreversible.' },
+  stack:    { title: 'Delete Stack',        body: 'Are you sure you want to delete this stack? This action is irreversible.' },
+  plotLine: { title: 'Delete Plot Line',    body: 'Are you sure you want to delete this plot line? This action is irreversible.' },
+  plotBand: { title: 'Delete Plot Band',    body: 'Are you sure you want to delete this plot band? This action is irreversible.' },
+};
+
+// Curated chart-friendly palette — better than raw Math.random() RGB which
+// produces muddy / low-contrast colors. Used as the default seed when the
+// user opens any Add modal so the Color field is never blank on open.
+const DEFAULT_COLOR_PALETTE = [
+  '#7B61FF', '#FF6B6B', '#4ECDC4', '#FFD93D', '#6BCB77',
+  '#4D96FF', '#FF8FB1', '#A66CFF', '#FFA94D', '#22C55E',
+  '#06B6D4', '#F472B6', '#8B5CF6', '#F59E0B', '#10B981',
+];
+function pickRandomColor(): string {
+  return DEFAULT_COLOR_PALETTE[Math.floor(Math.random() * DEFAULT_COLOR_PALETTE.length)];
+}
+
+// Ensures a default Left axis exists on the chart, and appends `newSourceId`
+// to it. Called whenever a series / fixed-series is added so the user never
+// has to create an axis manually before they see something on the chart.
+// If a left axis (yAxis === 0) already exists, the new source joins it; if
+// not, a brand-new "Left axis" entry is created. Idempotent w.r.t. ids
+// already present in the axis's seriesIds.
+function ensureLeftAxisWithSource(axes: AxisConfig[], newSourceId: string): AxisConfig[] {
+  const leftIdx = axes.findIndex((a) => a.yAxis === 0);
+  if (leftIdx >= 0) {
+    const left = axes[leftIdx];
+    if (left.seriesIds.includes(newSourceId)) return axes;
+    return axes.map((a, i) => i === leftIdx ? { ...a, seriesIds: [...a.seriesIds, newSourceId] } : a);
+  }
+  const defaultLeft: AxisConfig = {
+    _id: `axis_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
+    name: 'Left axis',
+    yAxis: 0,
+    seriesIds: [newSourceId],
+  };
+  return [...axes, defaultLeft];
+}
+
+// Removes `sourceId` from every axis's seriesIds — used when a data source
+// is deleted so axes don't retain stale ids.
+function removeSourceFromAxes(axes: AxisConfig[], sourceId: string): AxisConfig[] {
+  return axes.map((a) => a.seriesIds.includes(sourceId)
+    ? { ...a, seriesIds: a.seriesIds.filter((id) => id !== sourceId) }
+    : a);
+}
+
 function makeDefaultChart(): ChartConfig {
+  return makeEmptyChart();
+}
+
+// Empty buffer used by the chart-settings state machine (Empty + Edit-new modes).
+// Includes `description` on top of the ChartConfig shape — coerced via a Partial
+// because the upstream type doesn't ship a description field; the configurator
+// keeps it on the chart object so each chart owns its own.
+function makeEmptyChart(): ChartConfig {
   return {
-    _id: `chart_${Date.now()}`,
+    _id: `chart_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
     title: '',
     series: [],
     fixedSeries: [],
@@ -244,11 +307,21 @@ export function ColumnChartConfiguration(props: ColumnChartConfigurationProps) {
 
   const [activeTab, setActiveTab] = useState<ActiveTab>('data');
 
-  // ── Charts list + which one is selected in the dropdown ──────────────────
-  const initCharts = config?.uiConfig?.charts?.length ? config.uiConfig.charts : [makeDefaultChart()];
+  // ── Charts list + chart-settings state machine ───────────────────────────
+  // charts = committed source of truth. Empty on first mount → "Empty" mode.
+  // activeChartId points the form at one committed chart in View mode.
+  // pendingChart / draft are scratch buffers — never emit until commitState().
+  const initCharts = config?.uiConfig?.charts ?? [];
   const [chartsList,       setChartsList]       = useState<ChartConfig[]>(initCharts);
-  const [selectedChartId,  setSelectedChartId]  = useState<string | null>(initCharts[0]._id);
+  const [selectedChartId,  setSelectedChartId]  = useState<string>(initCharts[0]?._id ?? '');
   const [chartPickerOpen,  setChartPickerOpen]  = useState(false);
+  const [pendingChart,     setPendingChart]     = useState<ChartConfig>(() => makeEmptyChart());
+  const [draft,            setDraft]            = useState<ChartConfig | null>(null);
+  const [editMode,         setEditMode]         = useState<'none' | 'edit-existing' | 'edit-new'>('none');
+  const [deleteConfirmOpen, setDeleteConfirmOpen] = useState(false);
+  // Per-row delete confirm (data source, fixed series, axis, stack, plot
+  // line, plot band). null when no confirm is pending.
+  const [deleteTarget, setDeleteTarget] = useState<{ kind: DeleteKind; chartId: string; id: string } | null>(null);
 
   // ── Expanded sections for the selected chart ──────────────────────────────
   const [expandedSections, setExpandedSections] = useState<Record<string, boolean>>({});
@@ -256,9 +329,6 @@ export function ColumnChartConfiguration(props: ColumnChartConfigurationProps) {
   // ── Widget-level state ────────────────────────────────────────────────────
   const [currentTimeConfig,    setCurrentTimeConfig]    = useState<TimeConfig | undefined>(config?.timeConfig);
   const [currentTimeTabConfig, setCurrentTimeTabConfig] = useState<Record<string, unknown> | undefined>(config?.timeTabConfig);
-  const [title,          setTitle]          = useState(config?.uiConfig?.title ?? '');
-  const [description,    setDescription]    = useState(config?.uiConfig?.description ?? '');
-  const [titleTouched,   setTitleTouched]   = useState(false);
   const [wrapInCard,     setWrapInCard]     = useState(config?.uiConfig?.style?.card?.wrapInCard ?? true);
   const [stacked,        setStacked]        = useState(config?.uiConfig?.style?.stacked ?? false);
   const [showLegend,     setShowLegend]     = useState(config?.uiConfig?.style?.showLegend ?? true);
@@ -327,23 +397,32 @@ export function ColumnChartConfiguration(props: ColumnChartConfigurationProps) {
   const [styleGeneralExpanded, setStyleGeneralExpanded] = useState(false);
   const [styleChartExpanded,   setStyleChartExpanded]   = useState(false);
 
-  const [showChartValidation, setShowChartValidation] = useState(false);
-  const [addChartError,       setAddChartError]       = useState('');
-
   useEffect(() => {
     if (config) {
       const raw = config.uiConfig?.charts ?? [];
-      let charts = raw.length > 0 ? raw : [makeDefaultChart()];
-      // Migrate legacy widget-level title onto the first chart if it has none.
-      const firstTitle = charts[0]?.title || config.uiConfig?.title || '';
-      if (charts[0] && !charts[0].title && firstTitle) {
-        charts = charts.map((c, i) => (i === 0 ? { ...c, title: firstTitle } : c));
+      // Migrate legacy widget-level title/description onto the first chart if
+      // the first chart doesn't carry its own.
+      let charts = raw;
+      if (charts.length > 0) {
+        const legacyTitle = config.uiConfig?.title;
+        const legacyDesc  = config.uiConfig?.description;
+        const patch: Partial<ChartConfig> = {};
+        if (!charts[0].title && legacyTitle) patch.title = legacyTitle;
+        if (charts[0].description === undefined && legacyDesc !== undefined) patch.description = legacyDesc;
+        if (Object.keys(patch).length > 0) {
+          charts = charts.map((c, i) => (i === 0 ? { ...c, ...patch } : c));
+        }
       }
       setChartsList(charts);
-      setSelectedChartId(charts[0]._id);
-      setTitle(charts[0]?.title ?? '');
-      setDescription(config.uiConfig?.description ?? '');
-      setTitleTouched(false);
+      const persistedActive = config.uiConfig?.activeChartId;
+      const nextActiveId =
+        (persistedActive && charts.find((c) => c._id === persistedActive)) ? persistedActive : (charts[0]?._id ?? '');
+      setSelectedChartId(nextActiveId);
+      // Drop any in-flight edit/empty buffers so the form snaps to the loaded chart.
+      setPendingChart(makeEmptyChart());
+      setDraft(null);
+      setEditMode('none');
+      setDeleteConfirmOpen(false);
       setWrapInCard(config.uiConfig?.style?.card?.wrapInCard ?? true);
       setStacked(config.uiConfig?.style?.stacked ?? false);
       setShowLegend(config.uiConfig?.style?.showLegend ?? true);
@@ -384,10 +463,23 @@ export function ColumnChartConfiguration(props: ColumnChartConfigurationProps) {
     }
   }, [config?._id]);
 
+  // The above effect only re-patches when the widget _id changes. The host may
+  // re-pass the same envelope (same _id) after an external save → reopen, with
+  // an updated timeTabConfig that local state doesn't yet reflect. Re-sync the
+  // time-tab state any time the prop reference for it changes; on echo from
+  // our own emit (same object reference) React no-ops the setState.
+  useEffect(() => {
+    if (config?.timeTabConfig) setCurrentTimeTabConfig(config.timeTabConfig);
+  }, [config?.timeTabConfig]);
+  useEffect(() => {
+    if (config?.timeConfig) setCurrentTimeConfig(config.timeConfig);
+  }, [config?.timeConfig]);
+
   // ── Builders ──────────────────────────────────────────────────────────────
 
   function buildUiConfig(overrides: {
     charts?: ChartConfig[];
+    activeChartId?: string;
     title?: string;
     description?: string;
     wrapInCard?: boolean;
@@ -399,10 +491,14 @@ export function ColumnChartConfiguration(props: ColumnChartConfigurationProps) {
     widgetElements?: WidgetElementsConfig;
     advancedSettings?: WidgetAdvancedSettingsConfig;
   }): ColumnChartUIConfig {
+    const nextCharts = overrides.charts ?? chartsList;
+    const nextActiveId = overrides.activeChartId ?? selectedChartId;
+    const nextActiveChart = nextCharts.find((c) => c._id === nextActiveId) ?? nextCharts[0];
     return {
-      title:       overrides.title       ?? title,
-      description: (overrides.description ?? description) || undefined,
-      charts:      overrides.charts      ?? chartsList,
+      title:       overrides.title       ?? (nextActiveChart?.title ?? ''),
+      description: (overrides.description ?? nextActiveChart?.description) || undefined,
+      charts:      nextCharts,
+      activeChartId: nextActiveChart?._id,
       style: {
         card: { wrapInCard: overrides.wrapInCard ?? wrapInCard, bg: '' },
         stacked:        overrides.stacked        ?? stacked,
@@ -515,17 +611,12 @@ export function ColumnChartConfiguration(props: ColumnChartConfigurationProps) {
 
   function updateWidgetElements(patch: Partial<WidgetElementsConfig>) {
     const next = {
-      hideWidgetElements: widgetElementsEnabled,
       hideSettingsIcon,
       hideExportIcon,
       hideChartTitle,
       ...patch,
     };
-    const nextHideWidgetElements =
-      next.hideWidgetElements ||
-      next.hideSettingsIcon ||
-      next.hideExportIcon ||
-      next.hideChartTitle;
+    const nextHideWidgetElements = next.hideSettingsIcon || next.hideExportIcon || next.hideChartTitle;
     if ('hideSettingsIcon' in patch) setHideSettingsIcon(next.hideSettingsIcon);
     if ('hideExportIcon' in patch) setHideExportIcon(next.hideExportIcon);
     if ('hideChartTitle' in patch) setHideChartTitle(next.hideChartTitle);
@@ -573,72 +664,207 @@ export function ColumnChartConfiguration(props: ColumnChartConfigurationProps) {
     setExpandedSections((prev) => ({ ...prev, [section]: !prev[section] }));
   }
 
-  // Reset section expanded state when switching charts
+  // ── Chart-settings state machine: derived modes ──────────────────────────
+
+  const activeChart: ChartConfig | null =
+    chartsList.find((c) => c._id === selectedChartId) ?? chartsList[0] ?? null;
+  const isEditing = editMode !== 'none';
+  const isEmpty   = chartsList.length === 0 && !isEditing;
+  const isView    = chartsList.length > 0 && !isEditing;
+  // The single chart the form reads/writes, by mode.
+  const formChart: ChartConfig | null =
+    isEmpty ? pendingChart : (isEditing ? draft : activeChart) ?? null;
+  const titleError = isEditing && (draft?.title?.trim() ?? '') === '';
+  const canAddEmpty  = pendingChart.title.trim() !== '';
+  const canCommitDraft = (d: ChartConfig | null) => d !== null && d.title.trim() !== '';
+
+  // The single emit funnel — only this writes upstream. Buffers don't emit.
+  function commitState(nextCharts: ChartConfig[], opts?: { activeChartId?: string }) {
+    const nextActiveId = opts?.activeChartId ?? selectedChartId;
+    // Emit when there's something to render, OR when an envelope already existed
+    // (so deleting the last chart still notifies the parent to clear).
+    if (nextCharts.length > 0 || config) {
+      emit({ charts: nextCharts, activeChartId: nextActiveId });
+    }
+  }
+
+  // Route every field change to the right target by mode. View edits commit live.
+  function patchActive(patch: Partial<ChartConfig>) {
+    if (editMode !== 'none') {
+      setDraft((d) => ({ ...(d ?? makeEmptyChart()), ...patch }));
+      return;
+    }
+    if (chartsList.length === 0) {
+      setPendingChart((p) => ({ ...p, ...patch }));
+      return;
+    }
+    const next = chartsList.map((c) => (c._id === selectedChartId ? { ...c, ...patch } : c));
+    setChartsList(next);
+    commitState(next);
+  }
+
+  // Reset section expanded state when switching charts (View-mode dropdown).
   function selectChart(chartId: string) {
     setSelectedChartId(chartId);
     setChartPickerOpen(false);
     setExpandedSections({});
-    const chart = chartsList.find((c) => c._id === chartId);
-    setTitle(chart?.title ?? '');
+    commitState(chartsList, { activeChartId: chartId });
   }
 
-  // ── Chart CRUD ────────────────────────────────────────────────────────────
-
-  function handleAddChart() {
-    if (!title.trim()) {
-      setShowChartValidation(true);
-      setTitleTouched(true);
-      setAddChartError('Chart title is required before adding a new chart.');
-      return;
-    }
-    if (selectedChart && selectedChart.series.length === 0) {
-      setShowChartValidation(true);
-      setAddChartError('At least one series is required before adding a new chart.');
-      return;
-    }
-    setShowChartValidation(false);
-    setAddChartError('');
-    const id = `chart_${Date.now()}`;
-    const newChart: ChartConfig = {
-      _id: id,
-      title: '',
-      series: [],
-      fixedSeries: [],
-      axes: [],
-      stacks: [],
-      plotLines: [],
-      plotBands: [],
-    };
-    const next = [...chartsList, newChart];
+  // Empty mode → promote pendingChart to the first committed chart.
+  function handleEmptyAddChart() {
+    if (!canAddEmpty) return;
+    const committed: ChartConfig = { ...pendingChart, title: pendingChart.title.trim() };
+    const next = [committed];
     setChartsList(next);
-    selectChart(id);
-    emit({ charts: next });
+    setSelectedChartId(committed._id);
+    setPendingChart(makeEmptyChart());
+    commitState(next, { activeChartId: committed._id });
   }
 
-  function handleDeleteChart(chartId: string) {
-    let next = chartsList.filter((c) => c._id !== chartId);
-    if (next.length === 0) next = [makeDefaultChart()];
+  function startEditNew() {
+    setDraft(makeEmptyChart());
+    setEditMode('edit-new');
+  }
+
+  function startEditExisting() {
+    if (!activeChart) return;
+    // Edit a COPY of the active chart so Cancel discards cleanly.
+    setDraft({ ...activeChart });
+    setEditMode('edit-existing');
+  }
+
+  function saveDraft() {
+    if (!canCommitDraft(draft)) return;
+    const committed: ChartConfig = { ...draft!, title: draft!.title.trim() };
+    const next = editMode === 'edit-existing'
+      ? chartsList.map((c) => (c._id === committed._id ? committed : c))
+      : [...chartsList, committed];
     setChartsList(next);
-    if (selectedChartId === chartId) {
-      setSelectedChartId(next[next.length - 1]._id);
-      setExpandedSections({});
+    setSelectedChartId(committed._id);
+    setExpandedSections({});
+    commitState(next, { activeChartId: committed._id });
+    setDraft(null);
+    setEditMode('none');
+  }
+
+  function cancelEdit() {
+    setDraft(null);
+    setEditMode('none');
+  }
+
+  function removeActiveChart() {
+    if (!activeChart) return;
+    const removedId = activeChart._id;
+    const remaining = chartsList.filter((c) => c._id !== removedId);
+    setDraft(null);
+    setEditMode('none');
+    setDeleteConfirmOpen(false);
+    setExpandedSections({});
+    if (remaining.length === 0) {
+      setChartsList([]);
+      setSelectedChartId('');
+      setPendingChart(makeEmptyChart());
+      commitState([], { activeChartId: '' });
+      return;
     }
-    emit({ charts: next });
+    const fallback = remaining[0];
+    setChartsList(remaining);
+    setSelectedChartId(fallback._id);
+    commitState(remaining, { activeChartId: fallback._id });
+  }
+
+  // Confirm + execute deletion of the currently-pending row target. Routes
+  // by `kind` so each section's array on the active chart is rebuilt without
+  // the deleted entry. Series / fixed-series deletes also strip the deleted
+  // id from any axis that references it via `removeSourceFromAxes`.
+  function confirmDeleteTarget() {
+    if (!deleteTarget) return;
+    const chart = chartsList.find((c) => c._id === deleteTarget.chartId);
+    if (!chart) { setDeleteTarget(null); return; }
+    const id = deleteTarget.id;
+    let update: Partial<ChartConfig> = {};
+    switch (deleteTarget.kind) {
+      case 'series':
+        update = {
+          series: chart.series.filter((x) => x._id !== id),
+          axes:   removeSourceFromAxes(chart.axes ?? [], id),
+        };
+        break;
+      case 'fixed':
+        update = {
+          fixedSeries: chart.fixedSeries.filter((x) => x._id !== id),
+          axes:        removeSourceFromAxes(chart.axes ?? [], id),
+        };
+        break;
+      case 'axis':
+        update = { axes: (chart.axes ?? []).filter((x) => x._id !== id) };
+        break;
+      case 'stack':
+        update = { stacks: chart.stacks.filter((x) => x._id !== id) };
+        break;
+      case 'plotLine':
+        update = { plotLines: chart.plotLines.filter((x) => x._id !== id) };
+        break;
+      case 'plotBand':
+        update = { plotBands: chart.plotBands.filter((x) => x._id !== id) };
+        break;
+    }
+    updateChartInList(deleteTarget.chartId, update);
+    setDeleteTarget(null);
   }
 
   // ── Modal helpers ─────────────────────────────────────────────────────────
 
+  // Anchor side-panel modals next to the clicked accordion row. Mirrors the
+  // DataPoint widget's side-panel logic:
+  //   x = configurator-column right edge + 20px gutter
+  //   y = clicked accordion header's top, clamped into the viewport so the
+  //       fully-expanded modal fits with a 16px safe margin.
+  // estHeight is the fully-expanded modal body height — used only for the
+  // viewport-fit clamp. CSS reads --cc-anchor-y to derive max-height.
+  function computeAnchorFromEvent(e: React.MouseEvent, estHeight = 500) {
+    const margin = 16;
+    const trigger = e.currentTarget as HTMLElement | null;
+    const headerEl =
+      (trigger?.closest('.fds-pa-item__header') as HTMLElement | null) ??
+      (trigger?.closest('.fds-pa-item') as HTMLElement | null) ??
+      trigger;
+    const anchorRect = headerEl?.getBoundingClientRect();
+    const panelEl =
+      (configRef.current?.closest('.app__config') as HTMLElement | null) ??
+      configRef.current;
+    const panelRect = panelEl?.getBoundingClientRect();
+    const x = (panelRect?.right ?? 0) + 20;
+    const vh = window.innerHeight;
+    let y = anchorRect?.top ?? margin;
+    if (y + estHeight + margin > vh) {
+      y = Math.max(margin, vh - estHeight - margin);
+    }
+    if (y < margin) y = margin;
+    setModalX(x);
+    setModalY(y);
+    document.documentElement.style.setProperty('--cc-anchor-y', `${y}px`);
+  }
+
+  // Per-section expected fully-expanded heights. Used by computeAnchorFromEvent
+  // only for the viewport-fit clamp (no hard size constraint applied below).
+  const SECTION_EST_HEIGHT: Record<ModalSection, number> = {
+    series:   480, // Label + Color + UNS + Unit/Precision row
+    fixed:    420, // Label + Color + UNS
+    axis:     360, // Name + side + series multi-select
+    stack:    320, // Name + series multi-select
+    plotLine: 620, // Label + value + color + width + dashStyle + periodicity block
+    plotBand: 380, // Label + from/to + color
+  };
+
   function openAddModal(chartId: string, section: ModalSection, e: React.MouseEvent) {
     e.stopPropagation();
-    if (configRef.current) {
-      const rect = configRef.current.getBoundingClientRect();
-      setModalX(rect.right + 30);
-      setModalY(rect.top);
-    }
+    computeAnchorFromEvent(e, SECTION_EST_HEIGHT[section]);
     setModalChartId(chartId);
     setModalSection(section);
     setEditingId(null);
-    setFormUnsPath(''); setFormLabel(''); setFormColor(''); setFormUnit(''); setFormPrecision('');
+    setFormUnsPath(''); setFormLabel(''); setFormColor(pickRandomColor()); setFormUnit(''); setFormPrecision('');
     setFormAxisName(''); setFormAxisYAxis(0); setFormAxisSeriesIds([]); setFormAxisSeriesDropdownOpen(false);
     setFormStackName(''); setFormStackSeriesIds([]); setFormStackSeriesDropdownOpen(false);
     setFormValue(''); setFormFrom(''); setFormTo(''); setFormWidth('');
@@ -654,11 +880,7 @@ export function ColumnChartConfiguration(props: ColumnChartConfigurationProps) {
     item: ColumnChartSeriesConfig | { _id: string; unsPath: string; label: string; color?: string; unit?: string },
   ) {
     e.stopPropagation();
-    if (configRef.current) {
-      const rect = configRef.current.getBoundingClientRect();
-      setModalX(rect.right + 30);
-      setModalY(rect.top);
-    }
+    computeAnchorFromEvent(e, SECTION_EST_HEIGHT[section]);
     setModalChartId(chartId);
     setModalSection(section);
     setEditingId(item._id);
@@ -673,11 +895,7 @@ export function ColumnChartConfiguration(props: ColumnChartConfigurationProps) {
 
   function openEditPlotLineModal(chartId: string, e: React.MouseEvent, item: PlotLineConfig) {
     e.stopPropagation();
-    if (configRef.current) {
-      const rect = configRef.current.getBoundingClientRect();
-      setModalX(rect.right + 30);
-      setModalY(rect.top);
-    }
+    computeAnchorFromEvent(e, SECTION_EST_HEIGHT.plotLine);
     setModalChartId(chartId);
     setModalSection('plotLine');
     setEditingId(item._id);
@@ -696,11 +914,7 @@ export function ColumnChartConfiguration(props: ColumnChartConfigurationProps) {
 
   function openEditPlotBandModal(chartId: string, e: React.MouseEvent, item: PlotBandConfig) {
     e.stopPropagation();
-    if (configRef.current) {
-      const rect = configRef.current.getBoundingClientRect();
-      setModalX(rect.right + 30);
-      setModalY(rect.top);
-    }
+    computeAnchorFromEvent(e, SECTION_EST_HEIGHT.plotBand);
     setModalChartId(chartId);
     setModalSection('plotBand');
     setEditingId(item._id);
@@ -717,11 +931,7 @@ export function ColumnChartConfiguration(props: ColumnChartConfigurationProps) {
 
   function openEditAxisModal(chartId: string, e: React.MouseEvent, item: AxisConfig) {
     e.stopPropagation();
-    if (configRef.current) {
-      const rect = configRef.current.getBoundingClientRect();
-      setModalX(rect.right + 30);
-      setModalY(rect.top);
-    }
+    computeAnchorFromEvent(e, SECTION_EST_HEIGHT.axis);
     setModalChartId(chartId);
     setModalSection('axis');
     setEditingId(item._id);
@@ -734,11 +944,7 @@ export function ColumnChartConfiguration(props: ColumnChartConfigurationProps) {
 
   function openEditStackModal(chartId: string, e: React.MouseEvent, stack: StackConfig) {
     e.stopPropagation();
-    if (configRef.current) {
-      const rect = configRef.current.getBoundingClientRect();
-      setModalX(rect.right + 30);
-      setModalY(rect.top);
-    }
+    computeAnchorFromEvent(e, SECTION_EST_HEIGHT.stack);
     setModalChartId(chartId);
     setModalSection('stack');
     setEditingId(stack._id);
@@ -776,10 +982,12 @@ export function ColumnChartConfiguration(props: ColumnChartConfigurationProps) {
         unit: formUnit || undefined,
         precision: formPrecision !== '' ? Number(formPrecision) : undefined,
       };
+      const isAdding = !editingId;
       update = {
         series: editingId
           ? chart.series.map((s) => s._id === editingId ? entry : s)
           : [...chart.series, entry],
+        ...(isAdding ? { axes: ensureLeftAxisWithSource(chart.axes ?? [], entry._id) } : {}),
       };
     } else if (modalSection === 'plotLine') {
       const rawValue = formValue.trim();
@@ -850,10 +1058,12 @@ export function ColumnChartConfiguration(props: ColumnChartConfigurationProps) {
         label: formLabel,
         color: formColor || undefined,
       };
+      const isAdding = !editingId;
       update = {
         fixedSeries: editingId
           ? chart.fixedSeries.map((s) => s._id === editingId ? entry : s)
           : [...chart.fixedSeries, entry],
+        ...(isAdding ? { axes: ensureLeftAxisWithSource(chart.axes ?? [], entry._id) } : {}),
       };
     }
 
@@ -873,9 +1083,22 @@ export function ColumnChartConfiguration(props: ColumnChartConfigurationProps) {
   }
 
   // ── Selected chart ────────────────────────────────────────────────────────
+  // `selectedChart` is consumed by the downstream Data-tab sections (series,
+  // axes, plot lines, …). Those sections render in ALL modes (Empty too) so
+  // the user sees the structure of the configurator. In Empty mode there's no
+  // real chart, so fall back to an empty placeholder — the accordion bodies
+  // will render their "No … configured" hints and every action gets gated by
+  // `sectionsDisabled` below.
 
-  const selectedChart = chartsList.find((c) => c._id === selectedChartId) ?? null;
+  const EMPTY_SECTION_CHART: ChartConfig = {
+    _id: '', title: '', series: [], fixedSeries: [], axes: [], stacks: [], plotLines: [], plotBands: [],
+  };
+  const selectedChart =
+    chartsList.find((c) => c._id === selectedChartId) ?? chartsList[0] ?? EMPTY_SECTION_CHART;
   const selectedChartIndex = chartsList.findIndex((c) => c._id === selectedChartId);
+  // Sections show in every mode, but the user can only mutate them in View
+  // (Empty → no chart to attach to; Editing → finish chart settings first).
+  const sectionsDisabled = isEmpty || isEditing;
 
   // ── Render ────────────────────────────────────────────────────────────────
 
@@ -907,90 +1130,127 @@ export function ColumnChartConfiguration(props: ColumnChartConfigurationProps) {
         {/* ── Data Tab ── */}
         {activeTab === 'data' && (
           <>
-            {/* Widget-level settings */}
+            {/* ── Chart Settings (3-mode state machine) ─────────────────── */}
             <div className="cc-config__chart-settings">
-              <p className="LabelMediumDefault cc-config__chart-settings-heading">Chart Settings</p>
-              <TextInput
-                label="Chart title"
-                necessityIndicator="required"
-                placeholder="e.g. Energy Dashboard"
-                value={title}
-                validationState={(titleTouched && title.trim() === '') || (showChartValidation && !title.trim()) ? 'error' : 'none'}
-                errorText="Chart title is required"
-                onChange={({ value }) => {
-                  setTitle(value);
-                  const nextCharts = chartsList.map((c) =>
-                    c._id === selectedChartId ? { ...c, title: value } : c,
-                  );
-                  setChartsList(nextCharts);
-                  emit({ title: value, charts: nextCharts });
-                  if (showChartValidation) { setShowChartValidation(false); setAddChartError(''); }
-                }}
-                onBlur={() => setTitleTouched(true)}
-              />
+              <div className="cc-config__chart-settings-head">
+                <p className="BodySmallSemibold cc-config__chart-settings-heading">Chart Settings</p>
+                <span className="cc-config__chart-settings-actions">
+                  {/* Edit-existing → trash. Edit-new draft has nothing committed
+                      yet, so hide trash there to avoid deleting the previously
+                      active chart by mistake. Cancel discards the draft. */}
+                  {isEditing && editMode === 'edit-existing' && (
+                    <IconButton
+                      icon={<Trash2 size={14} />}
+                      size="16"
+                      aria-label="Delete chart"
+                      onClick={() => setDeleteConfirmOpen(true)}
+                    />
+                  )}
+                  {isView && (
+                    <>
+                      <Tooltip placement="Bottom" bodyText="Add New Chart">
+                        <IconButton
+                          icon={<Plus size={14} />}
+                          size="16"
+                          aria-label="Add chart"
+                          onClick={startEditNew}
+                        />
+                      </Tooltip>
+                      <Tooltip placement="Bottom" bodyText="Edit Chart">
+                        <IconButton
+                          icon={<Edit2 size={14} />}
+                          size="16"
+                          aria-label="Edit chart"
+                          onClick={startEditExisting}
+                        />
+                      </Tooltip>
+                    </>
+                  )}
+                </span>
+              </div>
+
+              {/* Title: switcher in View (multi-chart), TextInput otherwise. */}
+              {isView && chartsList.length > 1 ? (
+                <SelectInput
+                  label="Chart title"
+                  placeholder="Select chart"
+                  value={activeChart?.title || `Chart`}
+                  isOpen={chartPickerOpen}
+                  onClick={() => setChartPickerOpen((v) => !v)}
+                >
+                  {chartPickerOpen && (
+                    <DropdownMenu>
+                      <ActionListItemGroup>
+                        {chartsList.map((chart, i) => (
+                          <ActionListItem
+                            key={chart._id}
+                            title={chart.title || `Chart ${i + 1}`}
+                            selectionType="Single"
+                            isSelected={selectedChartId === chart._id}
+                            onClick={() => selectChart(chart._id)}
+                          />
+                        ))}
+                      </ActionListItemGroup>
+                    </DropdownMenu>
+                  )}
+                </SelectInput>
+              ) : (
+                <TextInput
+                  label="Chart title"
+                  necessityIndicator="required"
+                  isReadOnly={isView}
+                  placeholder={isView ? '—' : 'Enter chart title'}
+                  value={formChart?.title ?? ''}
+                  validationState={titleError ? 'error' : 'none'}
+                  errorText="Chart title is required"
+                  onChange={({ value }) => patchActive({ title: value })}
+                />
+              )}
+
               <TextInput
                 label="Description"
-                placeholder="e.g. Monthly energy usage across zones"
-                value={description}
-                onChange={({ value }) => { setDescription(value); emit({ description: value }); }}
+                isReadOnly={isView}
+                placeholder={isView ? '—' : 'Enter description'}
+                value={formChart?.description ?? ''}
+                onChange={({ value }) => patchActive({ description: value })}
               />
+
+              {isEmpty && canAddEmpty && (
+                <div className="cc-config__chart-settings-footer">
+                  <Button variant="Primary" label="Save" onClick={handleEmptyAddChart} />
+                </div>
+              )}
+              {isEditing && (
+                <div className="cc-config__chart-settings-footer">
+                  <Button variant="Gray" label="Cancel" onClick={cancelEdit} />
+                  <Button
+                    variant="Primary"
+                    label="Save"
+                    isDisabled={!canCommitDraft(draft)}
+                    onClick={saveDraft}
+                  />
+                </div>
+              )}
             </div>
 
-            {/* Chart selector dropdown */}
-            {chartsList.length > 0 && (
-              <div className="cc-config__chart-selector">
-                <div className="cc-config__chart-selector-input">
-                  <SelectInput
-                    label="Configure chart"
-                    placeholder="Select a chart…"
-                    value={
-                      selectedChart
-                        ? title || `Chart ${selectedChartIndex + 1}`
-                        : ''
-                    }
-                    isOpen={chartPickerOpen}
-                    onClick={() => setChartPickerOpen((v) => !v)}
-                  >
-                    {chartPickerOpen && (
-                      <DropdownMenu>
-                        <ActionListItemGroup>
-                          {chartsList.map((chart, i) => (
-                            <ActionListItem
-                              key={chart._id}
-                              title={chart.title || `Chart ${i + 1}`}
-                              selectionType="Single"
-                              isSelected={selectedChartId === chart._id}
-                              onClick={() => selectChart(chart._id)}
-                            />
-                          ))}
-                        </ActionListItemGroup>
-                      </DropdownMenu>
-                    )}
-                  </SelectInput>
-                </div>
-                {selectedChart && (
-                  <IconButton
-                    icon={<Trash2 size={13} />}
-                    size="16"
-                    aria-label="Delete chart"
-                    onClick={() => handleDeleteChart(selectedChart._id)}
-                  />
-                )}
-              </div>
-            )}
-
-            {/* Sections for the selected chart */}
+            {/* Downstream sections render in every mode so the user always sees
+                the configurator's structure; in Empty/Editing they're disabled
+                via `sectionsDisabled` so the chart-settings action completes
+                first. */}
             <>
                 {/* Data Source */}
                 <ProductAccordionItem
                   title="Data Source"
                   trailingIcon={selectedChart.series.length > 0
-                    ? <Badge color="Neutral" emphasis="Subtle" size="Small" label={String(selectedChart.series.length)} />
+                    ? <PATrailingItem trailing="Counter">{selectedChart.series.length}</PATrailingItem>
                     : undefined}
+                  isActive={selectedChart.series.length > 0}
+                  isDisabled={sectionsDisabled}
                   isExpanded={isSectionOpen('series')}
                   onToggle={() => toggleSection('series')}
                   headerAction={
                     <IconButton
+                      isDisabled={sectionsDisabled}
                       icon={<Plus size={14} />}
                       size="16"
                       aria-label="Add series"
@@ -1005,14 +1265,15 @@ export function ColumnChartConfiguration(props: ColumnChartConfigurationProps) {
                     {selectedChart.series.map((s, i) => (
                       <ListCard
                         key={s._id}
+                        className="cc-config__row-card"
                         title={s.label || `Series ${i + 1}`}
-                        subtitle={s.unit || undefined}
+                        subtitle={s.unsPath || undefined}
                         leadingItem={s.color ? <ListCardLeadingItem leading="Color" color={s.color} /> : undefined}
+                        onClick={(e) => openEditModal(selectedChart._id, 'series', e, s)}
                         trailingItems={
-                          <>
-                            <ListCardTrailingItem trailing="Icon" icon={<IconButton icon={<Edit2 size={13} />} size="16" aria-label="Edit" onClick={(e) => openEditModal(selectedChart._id, 'series', e, s)} />} />
-                            <ListCardTrailingItem trailing="Icon" icon={<IconButton icon={<Trash2 size={13} />} size="16" aria-label="Delete" onClick={() => updateChartInList(selectedChart._id, { series: selectedChart.series.filter((x) => x._id !== s._id) })} />} />
-                          </>
+                          <ListCardTrailingItem trailing="Icon" icon={
+                            <IconButton icon={<Trash2 size={13} />} size="16" aria-label="Delete" onClick={(e) => { e.stopPropagation(); setDeleteTarget({ kind: 'series', chartId: selectedChart._id, id: s._id }); }} />
+                          } />
                         }
                       />
                     ))}
@@ -1023,12 +1284,15 @@ export function ColumnChartConfiguration(props: ColumnChartConfigurationProps) {
                 <ProductAccordionItem
                   title="Fixed Series"
                   trailingIcon={selectedChart.fixedSeries.length > 0
-                    ? <Badge color="Neutral" emphasis="Subtle" size="Small" label={String(selectedChart.fixedSeries.length)} />
+                    ? <PATrailingItem trailing="Counter">{selectedChart.fixedSeries.length}</PATrailingItem>
                     : undefined}
+                  isActive={selectedChart.fixedSeries.length > 0}
+                  isDisabled={sectionsDisabled}
                   isExpanded={isSectionOpen('fixed')}
                   onToggle={() => toggleSection('fixed')}
                   headerAction={
                     <IconButton
+                      isDisabled={sectionsDisabled}
                       icon={<Plus size={14} />}
                       size="16"
                       aria-label="Add fixed series"
@@ -1043,13 +1307,15 @@ export function ColumnChartConfiguration(props: ColumnChartConfigurationProps) {
                     {selectedChart.fixedSeries.map((s, i) => (
                       <ListCard
                         key={s._id}
+                        className="cc-config__row-card"
                         title={s.label || `Fixed ${i + 1}`}
+                        subtitle={s.unsPath || undefined}
                         leadingItem={s.color ? <ListCardLeadingItem leading="Color" color={s.color} /> : undefined}
+                        onClick={(e) => openEditModal(selectedChart._id, 'fixed', e, s)}
                         trailingItems={
-                          <>
-                            <ListCardTrailingItem trailing="Icon" icon={<IconButton icon={<Edit2 size={13} />} size="16" aria-label="Edit" onClick={(e) => openEditModal(selectedChart._id, 'fixed', e, s)} />} />
-                            <ListCardTrailingItem trailing="Icon" icon={<IconButton icon={<Trash2 size={13} />} size="16" aria-label="Delete" onClick={() => updateChartInList(selectedChart._id, { fixedSeries: selectedChart.fixedSeries.filter((x) => x._id !== s._id) })} />} />
-                          </>
+                          <ListCardTrailingItem trailing="Icon" icon={
+                            <IconButton icon={<Trash2 size={13} />} size="16" aria-label="Delete" onClick={(e) => { e.stopPropagation(); setDeleteTarget({ kind: 'fixed', chartId: selectedChart._id, id: s._id }); }} />
+                          } />
                         }
                       />
                     ))}
@@ -1060,12 +1326,15 @@ export function ColumnChartConfiguration(props: ColumnChartConfigurationProps) {
                 <ProductAccordionItem
                   title="Axis"
                   trailingIcon={(selectedChart.axes ?? []).length > 0
-                    ? <Badge color="Neutral" emphasis="Subtle" size="Small" label={String((selectedChart.axes ?? []).length)} />
+                    ? <PATrailingItem trailing="Counter">{(selectedChart.axes ?? []).length}</PATrailingItem>
                     : undefined}
+                  isActive={(selectedChart.axes ?? []).length > 0}
+                  isDisabled={sectionsDisabled}
                   isExpanded={isSectionOpen('axis')}
                   onToggle={() => toggleSection('axis')}
                   headerAction={
                     <IconButton
+                      isDisabled={sectionsDisabled}
                       icon={<Plus size={14} />}
                       size="16"
                       aria-label="Add axis"
@@ -1086,33 +1355,22 @@ export function ColumnChartConfiguration(props: ColumnChartConfigurationProps) {
                         return (
                           <ListCard
                             key={axis._id}
+                            className="cc-config__row-card"
                             title={axis.name || 'Unnamed Axis'}
                             subtitle={`${axisLabel}${axisSeries.length > 0 ? ` • ${axisSeries.length} series` : ''}`}
+                            onClick={(e) => openEditAxisModal(selectedChart._id, e, axis)}
                             trailingItems={
-                              <>
-                                <ListCardTrailingItem
-                                  trailing="Icon"
-                                  icon={(
-                                    <IconButton
-                                      icon={<Edit2 size={13} />}
-                                      size="16"
-                                      aria-label="Edit"
-                                      onClick={(e) => openEditAxisModal(selectedChart._id, e, axis)}
-                                    />
-                                  )}
-                                />
-                                <ListCardTrailingItem
-                                  trailing="Icon"
-                                  icon={(
-                                    <IconButton
-                                      icon={<Trash2 size={13} />}
-                                      size="16"
-                                      aria-label="Delete"
-                                      onClick={() => updateChartInList(selectedChart._id, { axes: (selectedChart.axes ?? []).filter((item) => item._id !== axis._id) })}
-                                    />
-                                  )}
-                                />
-                              </>
+                              <ListCardTrailingItem
+                                trailing="Icon"
+                                icon={(
+                                  <IconButton
+                                    icon={<Trash2 size={13} />}
+                                    size="16"
+                                    aria-label="Delete"
+                                    onClick={(e) => { e.stopPropagation(); setDeleteTarget({ kind: 'axis', chartId: selectedChart._id, id: axis._id }); }}
+                                  />
+                                )}
+                              />
                             }
                           />
                         );
@@ -1125,12 +1383,15 @@ export function ColumnChartConfiguration(props: ColumnChartConfigurationProps) {
                 <ProductAccordionItem
                   title="Stack"
                   trailingIcon={selectedChart.stacks.length > 0
-                    ? <Badge color="Neutral" emphasis="Subtle" size="Small" label={String(selectedChart.stacks.length)} />
+                    ? <PATrailingItem trailing="Counter">{selectedChart.stacks.length}</PATrailingItem>
                     : undefined}
+                  isActive={selectedChart.stacks.length > 0}
+                  isDisabled={sectionsDisabled}
                   isExpanded={isSectionOpen('stack')}
                   onToggle={() => toggleSection('stack')}
                   headerAction={
                     <IconButton
+                      isDisabled={sectionsDisabled}
                       icon={<Plus size={14} />}
                       size="16"
                       aria-label="Add stack"
@@ -1145,13 +1406,14 @@ export function ColumnChartConfiguration(props: ColumnChartConfigurationProps) {
                     {selectedChart.stacks.map((stack) => (
                       <ListCard
                         key={stack._id}
+                        className="cc-config__row-card"
                         title={stack.name || 'Unnamed Stack'}
                         subtitle={stack.seriesIds.length > 0 ? `${stack.seriesIds.length} series` : undefined}
+                        onClick={(e) => openEditStackModal(selectedChart._id, e, stack)}
                         trailingItems={
-                          <>
-                            <ListCardTrailingItem trailing="Icon" icon={<IconButton icon={<Edit2 size={13} />} size="16" aria-label="Edit" onClick={(e) => openEditStackModal(selectedChart._id, e, stack)} />} />
-                            <ListCardTrailingItem trailing="Icon" icon={<IconButton icon={<Trash2 size={13} />} size="16" aria-label="Delete" onClick={() => updateChartInList(selectedChart._id, { stacks: selectedChart.stacks.filter((st) => st._id !== stack._id) })} />} />
-                          </>
+                          <ListCardTrailingItem trailing="Icon" icon={
+                            <IconButton icon={<Trash2 size={13} />} size="16" aria-label="Delete" onClick={(e) => { e.stopPropagation(); setDeleteTarget({ kind: 'stack', chartId: selectedChart._id, id: stack._id }); }} />
+                          } />
                         }
                       />
                     ))}
@@ -1162,12 +1424,14 @@ export function ColumnChartConfiguration(props: ColumnChartConfigurationProps) {
                 <ProductAccordionItem
                   title="Plot Lines"
                   trailingIcon={selectedChart.plotLines.length > 0
-                    ? <Badge color="Neutral" emphasis="Subtle" size="Small" label={String(selectedChart.plotLines.length)} />
+                    ? <PATrailingItem trailing="Counter">{selectedChart.plotLines.length}</PATrailingItem>
                     : undefined}
+                  isActive={selectedChart.plotLines.length > 0}
+                  isDisabled={sectionsDisabled}
                   isExpanded={isSectionOpen('plotLine')}
                   onToggle={() => toggleSection('plotLine')}
                   headerAction={
-                    <IconButton icon={<Plus size={14} />} size="16" aria-label="Add plot line"
+                    <IconButton isDisabled={sectionsDisabled} icon={<Plus size={14} />} size="16" aria-label="Add plot line"
                       onClick={(e) => openAddModal(selectedChart._id, 'plotLine', e)}
                     />
                   }
@@ -1179,14 +1443,15 @@ export function ColumnChartConfiguration(props: ColumnChartConfigurationProps) {
                     {selectedChart.plotLines.map((p, i) => (
                       <ListCard
                         key={p._id}
+                        className="cc-config__row-card"
                         title={p.label || `Plot Line ${i + 1}`}
                         subtitle={String(p.value)}
                         leadingItem={p.color ? <ListCardLeadingItem leading="Color" color={p.color} /> : undefined}
+                        onClick={(e) => openEditPlotLineModal(selectedChart._id, e, p)}
                         trailingItems={
-                          <>
-                            <ListCardTrailingItem trailing="Icon" icon={<IconButton icon={<Edit2 size={13} />} size="16" aria-label="Edit" onClick={(e) => openEditPlotLineModal(selectedChart._id, e, p)} />} />
-                            <ListCardTrailingItem trailing="Icon" icon={<IconButton icon={<Trash2 size={13} />} size="16" aria-label="Delete" onClick={() => updateChartInList(selectedChart._id, { plotLines: selectedChart.plotLines.filter((x) => x._id !== p._id) })} />} />
-                          </>
+                          <ListCardTrailingItem trailing="Icon" icon={
+                            <IconButton icon={<Trash2 size={13} />} size="16" aria-label="Delete" onClick={(e) => { e.stopPropagation(); setDeleteTarget({ kind: 'plotLine', chartId: selectedChart._id, id: p._id }); }} />
+                          } />
                         }
                       />
                     ))}
@@ -1197,12 +1462,14 @@ export function ColumnChartConfiguration(props: ColumnChartConfigurationProps) {
                 <ProductAccordionItem
                   title="Plot Bands"
                   trailingIcon={selectedChart.plotBands.length > 0
-                    ? <Badge color="Neutral" emphasis="Subtle" size="Small" label={String(selectedChart.plotBands.length)} />
+                    ? <PATrailingItem trailing="Counter">{selectedChart.plotBands.length}</PATrailingItem>
                     : undefined}
+                  isActive={selectedChart.plotBands.length > 0}
+                  isDisabled={sectionsDisabled}
                   isExpanded={isSectionOpen('plotBand')}
                   onToggle={() => toggleSection('plotBand')}
                   headerAction={
-                    <IconButton icon={<Plus size={14} />} size="16" aria-label="Add plot band"
+                    <IconButton isDisabled={sectionsDisabled} icon={<Plus size={14} />} size="16" aria-label="Add plot band"
                       onClick={(e) => openAddModal(selectedChart._id, 'plotBand', e)}
                     />
                   }
@@ -1214,14 +1481,15 @@ export function ColumnChartConfiguration(props: ColumnChartConfigurationProps) {
                     {selectedChart.plotBands.map((p, i) => (
                       <ListCard
                         key={p._id}
+                        className="cc-config__row-card"
                         title={p.label || `Plot Band ${i + 1}`}
                         subtitle={`${p.from} – ${p.to}`}
                         leadingItem={p.color ? <ListCardLeadingItem leading="Color" color={p.color} /> : undefined}
+                        onClick={(e) => openEditPlotBandModal(selectedChart._id, e, p)}
                         trailingItems={
-                          <>
-                            <ListCardTrailingItem trailing="Icon" icon={<IconButton icon={<Edit2 size={13} />} size="16" aria-label="Edit" onClick={(e) => openEditPlotBandModal(selectedChart._id, e, p)} />} />
-                            <ListCardTrailingItem trailing="Icon" icon={<IconButton icon={<Trash2 size={13} />} size="16" aria-label="Delete" onClick={() => updateChartInList(selectedChart._id, { plotBands: selectedChart.plotBands.filter((x) => x._id !== p._id) })} />} />
-                          </>
+                          <ListCardTrailingItem trailing="Icon" icon={
+                            <IconButton icon={<Trash2 size={13} />} size="16" aria-label="Delete" onClick={(e) => { e.stopPropagation(); setDeleteTarget({ kind: 'plotBand', chartId: selectedChart._id, id: p._id }); }} />
+                          } />
                         }
                       />
                     ))}
@@ -1238,6 +1506,20 @@ export function ColumnChartConfiguration(props: ColumnChartConfigurationProps) {
               onChange={handleTimeChange}
               value={currentTimeTabConfig as Partial<TimeTabUIConfig> | undefined}
               globalTimepickers={props.globalTimepickers}
+              charts={chartsList.map((c, i) => ({
+                id: c._id,
+                name: c.title || `Chart ${i + 1}`,
+                sources: [
+                  ...c.series.map((s, si) => ({
+                    id: s._id,
+                    name: s.label || `Series ${si + 1}`,
+                  })),
+                  ...c.fixedSeries.map((f, fi) => ({
+                    id: f._id,
+                    name: f.label || `Fixed ${fi + 1}`,
+                  })),
+                ],
+              }))}
             />
           </div>
         )}
@@ -1245,81 +1527,6 @@ export function ColumnChartConfiguration(props: ColumnChartConfigurationProps) {
         {/* ── Style Tab ── */}
         {activeTab === 'style' && (
           <>
-            <div className="cc-config__style-top">
-              <SelectInput
-                label="Widget Size"
-                placeholder="Select size…"
-                value={
-                  widgetSizePreset === 'Custom'
-                    ? 'Custom'
-                    : widgetSizePreset === 'Medium'
-                    ? `Medium ${getWidgetSizeDimensions('Medium').width}x${getWidgetSizeDimensions('Medium').height}`
-                    : widgetSizePreset
-                }
-                isOpen={widgetSizePickerOpen}
-                onClick={() => setWidgetSizePickerOpen((v) => !v)}
-              >
-                {widgetSizePickerOpen && (
-                  <DropdownMenu>
-                    <ActionListItemGroup>
-                      {(['Small', 'Medium', 'Large', 'Custom'] as const).map((preset) => {
-                        const dims = preset === 'Medium' ? getWidgetSizeDimensions(preset) : null;
-                        return (
-                          <ActionListItem
-                            key={preset}
-                            title={preset === 'Medium' ? `${preset} ${dims.width}x${dims.height}` : preset}
-                            selectionType="Single"
-                            isSelected={widgetSizePreset === preset}
-                            onClick={() => applyWidgetSizePreset(preset)}
-                          />
-                        );
-                      })}
-                    </ActionListItemGroup>
-                  </DropdownMenu>
-                )}
-              </SelectInput>
-              {widgetSizePreset === 'Custom' && (
-                <div className="cc-style__widget-size-row">
-                  <TextInput
-                    label=""
-                    accessibilityLabel="Widget width"
-                    prefix="W"
-                    type="number"
-                    placeholder="580"
-                    value={widgetWidth}
-                    onChange={({ value }) => applyWidgetWidth(value)}
-                  />
-                  <TextInput
-                    label=""
-                    accessibilityLabel="Widget height"
-                    prefix="H"
-                    type="number"
-                    placeholder="400"
-                    value={widgetHeight}
-                    onChange={({ value }) => applyWidgetHeight(value)}
-                  />
-                  <IconButton
-                    icon={widgetLocked ? <Lock size={14} /> : <Unlock size={14} />}
-                    size="16"
-                    aria-label={widgetLocked ? 'Unlock widget size' : 'Lock widget size'}
-                    onClick={() => {
-                      const nextLocked = !widgetLocked;
-                      const currentWidth = parseWidgetDimension(widgetWidth, getWidgetSizeDimensions('Medium').width);
-                      const currentHeight = parseWidgetDimension(widgetHeight, getWidgetSizeDimensions('Medium').height);
-                      widgetAspectRatioRef.current = currentWidth / Math.max(currentHeight, 1);
-                      setWidgetLocked(nextLocked);
-                      emitWidgetSize({
-                        preset: 'Custom',
-                        width: currentWidth,
-                        height: currentHeight,
-                        locked: nextLocked,
-                      });
-                    }}
-                  />
-                </div>
-              )}
-            </div>
-
             <ProductAccordionItem
               title="General"
               isExpanded={styleGeneralExpanded}
@@ -1511,15 +1718,58 @@ export function ColumnChartConfiguration(props: ColumnChartConfigurationProps) {
 
       </div>
 
-      {/* ── Bottom footer: Add Chart (Data tab only) ── */}
-      {activeTab === 'data' && (
-        <div className="cc-config__footer">
-          {addChartError && (
-            <p className="cc-config__add-chart-error BodySmallRegular">{addChartError}</p>
-          )}
-          <Button variant="Primary" label="Add Chart" onClick={handleAddChart} />
-        </div>
-      )}
+      {/* ── Delete-chart confirm modal ─────────────────────────────────── */}
+      <Modal
+        isOpen={deleteConfirmOpen}
+        className="cc-delete-confirm-modal"
+        onClose={() => setDeleteConfirmOpen(false)}
+        header={
+          <ModalHeader
+            title="Delete Chart"
+            leadingItem={<span className="cc-delete-confirm-modal__icon"><Trash2 size={16} /></span>}
+            onClose={() => setDeleteConfirmOpen(false)}
+          />
+        }
+        footer={
+          <ModalFooter
+            primaryAction={<Button variant="Primary" color="Negative" label="Delete" onClick={removeActiveChart} />}
+            secondaryAction={<Button variant="Gray" label="Cancel" onClick={() => setDeleteConfirmOpen(false)} />}
+          />
+        }
+      >
+        <ModalBody>
+          <p className="BodyMediumRegular cc-delete-confirm-modal__body">
+            {`Are you sure you want to delete "${activeChart?.title || 'this chart'}" and all of its data sources, axes, plot lines, and plot bands? This action is irreversible.`}
+          </p>
+        </ModalBody>
+      </Modal>
+
+      {/* ── Row delete confirm modal (data source / fixed series / axis /
+              stack / plot line / plot band) ───────────────────────────── */}
+      <Modal
+        isOpen={deleteTarget !== null}
+        className="cc-delete-confirm-modal"
+        onClose={() => setDeleteTarget(null)}
+        header={
+          <ModalHeader
+            title={deleteTarget ? DELETE_COPY[deleteTarget.kind].title : ''}
+            leadingItem={<span className="cc-delete-confirm-modal__icon"><Trash2 size={16} /></span>}
+            onClose={() => setDeleteTarget(null)}
+          />
+        }
+        footer={
+          <ModalFooter
+            primaryAction={<Button variant="Primary" color="Negative" label="Delete" onClick={confirmDeleteTarget} />}
+            secondaryAction={<Button variant="Gray" label="Cancel" onClick={() => setDeleteTarget(null)} />}
+          />
+        }
+      >
+        <ModalBody>
+          <p className="BodyMediumRegular cc-delete-confirm-modal__body">
+            {deleteTarget ? DELETE_COPY[deleteTarget.kind].body : ''}
+          </p>
+        </ModalBody>
+      </Modal>
 
       {/* ── Shared Add / Edit Modal ── */}
       <Modal
@@ -1548,6 +1798,8 @@ export function ColumnChartConfiguration(props: ColumnChartConfigurationProps) {
               variant="Primary"
               label={
                 editingId ? 'Save'
+                : modalSection === 'series'   ? 'Add Data Source'
+                : modalSection === 'fixed'    ? 'Add Fixed Series'
                 : modalSection === 'plotBand' ? 'Add Plot Band'
                 : modalSection === 'plotLine' ? 'Add Plot Line'
                 : modalSection === 'axis'     ? 'Add Axis'
@@ -1582,8 +1834,13 @@ export function ColumnChartConfiguration(props: ColumnChartConfigurationProps) {
                   value={formLabel}
                   onChange={({ value }) => setFormLabel(value)}
                 />
+                <div>
+                  <InputFieldHeader label="Color" necessityIndicator="required" />
+                  <ColorInput value={formColor} onChange={(v) => setFormColor(v)} />
+                </div>
                 <UNSPathInput
                   label="UNS Path"
+                  necessityIndicator="required"
                   placeholder="Type / to browse UNS or paste {{topic}}"
                   value={formUnsPath}
                   tree={unsTree}
@@ -1597,10 +1854,6 @@ export function ColumnChartConfiguration(props: ColumnChartConfigurationProps) {
                     <TextInput label="Precision" type="number" placeholder="e.g. 2" value={formPrecision} onChange={({ value }) => setFormPrecision(value)} />
                   </div>
                 )}
-                <div>
-                  <InputFieldHeader label="Color" necessityIndicator="required" />
-                  <ColorInput value={formColor} onChange={(v) => setFormColor(v)} />
-                </div>
               </>
             )}
             {modalSection === 'plotLine' && (

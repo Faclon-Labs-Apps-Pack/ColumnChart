@@ -96,10 +96,12 @@ export default (env, argv) => {
     ...(!isProd && {
       devServer: {
         static: path.resolve(__dirname, 'public'),
+        host: '0.0.0.0',
         port: 3003,
         hot: true,
         open: false,
         historyApiFallback: true,
+        allowedHosts: 'all',
       },
     }),
   };

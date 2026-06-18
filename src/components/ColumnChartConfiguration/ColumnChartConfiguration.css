@@ -17,7 +17,7 @@
 }
 
 .cc-config__header-title {
-  color: var(--text-default-primary, #1a1a1a);
+  color: var(--text-gray-primary);
 }
 
 .cc-config__tab-content {
@@ -57,7 +57,7 @@
 
 .cc-config__advanced-heading {
   margin: 0;
-  color: var(--text-default-primary, #1a1a1a);
+  color: var(--text-gray-primary);
 }
 
 .cc-config__advanced-divider {
@@ -78,7 +78,74 @@
 
 .cc-config__chart-settings-heading {
   margin: 0;
-  color: var(--text-default-primary, #1a1a1a);
+  color: var(--text-gray-primary, #1a1a1a);
+}
+
+/* Header row of the Chart Settings block — title on the left, mode-driven
+   action icons (+, ✎, 🗑) on the right. */
+.cc-config__chart-settings-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--spacing-03, 8px);
+}
+
+.cc-config__chart-settings-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--spacing-02, 4px);
+}
+
+/* Footer row — Save in Empty mode, Cancel + Save in Edit modes. */
+.cc-config__chart-settings-footer {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: var(--spacing-03, 8px);
+  margin-top: var(--spacing-02, 4px);
+}
+
+.cc-delete-confirm-modal .fds-modal {
+  width: 360px;
+}
+.cc-delete-confirm-modal__body {
+  margin: 0;
+  color: var(--text-gray-secondary, #555);
+}
+/* Tinted red square wrapping the trash icon next to the modal title.
+   All values resolve from SDK tokens: error-secondary for the tinted
+   background, error-default for the icon color, border-radius-small for
+   the corner radius, spacing-08 (28px) for the square size. */
+.cc-delete-confirm-modal__icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: var(--spacing-08);
+  height: var(--spacing-08);
+  border-radius: var(--global-border-radius-small);
+  background: var(--background-error-secondary);
+  color: var(--text-error-default);
+}
+
+/* Row ListCards inside each accordion — click the whole card to edit, the
+   delete-trash only appears on hover. The SDK's trailing slot class is
+   `.fds-list-card-trailing` (the wrapper around all ListCardTrailingItems). */
+.cc-config__row-card {
+  cursor: pointer;
+}
+.cc-config__row-card .fds-list-card-trailing {
+  opacity: 0;
+  transition: opacity 0.15s ease;
+}
+.cc-config__row-card:hover .fds-list-card-trailing,
+.cc-config__row-card:focus-within .fds-list-card-trailing {
+  opacity: 1;
+}
+/* Truncate the UNS path subtitle to one line with ellipsis. */
+.cc-config__row-card .fds-list-card__subtitle {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 /* Section body inside Accordion items */
@@ -90,8 +157,18 @@
   gap: var(--spacing-04, 12px);
 }
 
+/* SDK's accordion body wraps content in `__body-inner` with padding +
+   spacing-05 gap of its own — when we put `cc-config__section` (which has
+   its own padding/gap) inside, the SDK's padding shows as a visible band
+   around the cards. Drop the SDK's padding so the configurator section is
+   the only source of spacing inside every accordion body. */
+.cc-config .fds-pa-item__body-inner {
+  padding: 0;
+  gap: 0;
+}
+
 .cc-config__empty-hint {
-  color: var(--text-default-tertiary, #aaa);
+  color: var(--text-gray-tertiary);
   margin: 0;
   font-style: italic;
 }
@@ -180,9 +257,66 @@
 .cc-config__time-tab {
 }
 
-/* Add/Edit series modal */
+/* Side-panel modal (Add/Edit series, fixed series, axis, stack, plot line, plot
+   band). Anchored next to the clicked accordion row by JS — sets --cc-anchor-y
+   on <html>; CSS reads it to derive max-height so the modal flows from the
+   row's top down to a 16px safe margin from the viewport bottom. Body scrolls
+   when content exceeds the available height. */
+.cc-series-modal.fds-modal__backdrop--transparent {
+  pointer-events: auto;
+}
 .cc-series-modal .fds-modal {
-  width: 300px;
+  width: 280px;
+  max-height: calc(100vh - var(--cc-anchor-y, 16px) - 16px);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+.cc-series-modal .fds-modal__body {
+  flex: 1 1 auto;
+  overflow-y: auto;
+  min-height: 0;
+}
+
+/* SDK's modal header wrapper sets padding-top/left/right but not bottom,
+   so the title butts up against the divider. Add a matching bottom pad
+   using the same token as the footer for visual symmetry. */
+.cc-series-modal .fds-modal-header__wrapper,
+.cc-delete-confirm-modal .fds-modal-header__wrapper {
+  padding-bottom: var(--spacing-05);
+}
+
+/* SDK's header root has gap: spacing-05 between the title wrapper and the
+   divider — that creates an extra ~16px purple-striped band stacked on top
+   of the wrapper's padding-bottom. Zero it out so the divider sits flush
+   against the bottom-padded wrapper. */
+.cc-series-modal .fds-modal-header__root,
+.cc-delete-confirm-modal .fds-modal-header__root {
+  gap: 0;
+}
+
+/* SDK's footer actions row uses spacing-06 (20px) padding by default. We
+   tighten it to spacing-05 (16px) for our configurator modals so the primary
+   Button sits closer to the modal edges while keeping visible breathing room.
+   The ModalFooter renders children inside a `__slot` div AND always renders
+   an empty `__stack` div next to it for primary/secondary actions — hide that
+   when empty so the slot can take 100% of the row, then stretch the slot's
+   child button to fill it. Applies to all side-panel + confirm modals. */
+.cc-series-modal .fds-modal-footer__actions,
+.cc-delete-confirm-modal .fds-modal-footer__actions {
+  padding: var(--spacing-05) var(--spacing-05);
+}
+.cc-series-modal .fds-modal-footer__stack:empty,
+.cc-delete-confirm-modal .fds-modal-footer__stack:empty {
+  display: none;
+}
+.cc-series-modal .fds-modal-footer__slot,
+.cc-delete-confirm-modal .fds-modal-footer__slot {
+  width: 100%;
+}
+.cc-series-modal .fds-modal-footer__slot > *,
+.cc-delete-confirm-modal .fds-modal-footer__slot > * {
+  width: 100%;
 }
 
 .cc-series-modal__body {
@@ -195,6 +329,18 @@
   display: grid;
   grid-template-columns: 1fr 1fr;
   gap: var(--spacing-03, 8px);
+}
+
+/* SelectInput / UNSPathInput / DropdownMenu portals must layer above the
+   modal's own stacking context — otherwise they're clipped behind the modal
+   shell when opened from inside it. */
+.fds-modal__backdrop .fds-select-input__popover,
+.fds-modal__backdrop .fds-uns-path-input__popover,
+.fds-modal__backdrop .fds-dropdown-menu {
+  z-index: var(--global-z-index-modal, 500);
+}
+.fds-uns-path-input__popover {
+  z-index: 9999 !important;
 }
 
 /* Dropdown row: SelectInput + delete icon */
