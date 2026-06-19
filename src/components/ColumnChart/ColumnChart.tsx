@@ -15,6 +15,8 @@ import { IconButton } from '@faclon-labs/design-sdk/IconButton';
 import { Home, Settings, Menu, Info } from 'react-feather';
 import { Tooltip } from '@faclon-labs/design-sdk/Tooltip';
 import { EmptyState, NoDataOneIllustration } from '@faclon-labs/design-sdk/EmptyState';
+import { ChartTimeProvider, buildShiftSeries, buildComparisonSeries } from '@faclon-labs/design-sdk';
+import type { ChartTimeMode } from '@faclon-labs/design-sdk';
 import {
   DataEntry,
   WidgetEvent,
@@ -470,11 +472,41 @@ function buildChartDisplayData(
   // our custom data-label and tooltip formatters.
   const theme = resolveChartTheme();
 
+  // Anchor the chart's em-relative font scale at 16px so Highcharts' default
+  // multipliers land on familiar pixel values:
+  //   axis labels = 0.8em → 12.8px
+  //   axis titles ≈ 1em   → 16px
+  //   legend     = 0.8em  → 12.8px  (SVG); HTML legend stays 12px via the
+  //                                  SDK's BodySmallRegular class)
+  //   data labels ≈ 0.7em → 11.2px (then overridden below for column inside-bar)
+  highchartsOptions.chart = {
+    ...(highchartsOptions.chart as Record<string, unknown> | undefined),
+    // X-axis drag-to-zoom is always enabled. Highcharts auto-renders the
+    // "Reset zoom" button when a zoom is active.
+    zoomType: 'x',
+    panKey: 'shift',
+    // When the user has the card wrap turned OFF, drop the SDK theme's
+    // default white chart background so the chart shows through the host
+    // page color instead of a floating white rectangle.
+    ...(config.style.card?.wrapInCard !== false ? {} : { backgroundColor: 'transparent' }),
+    style: {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      ...(((highchartsOptions.chart as any)?.style as Record<string, unknown> | undefined) ?? {}),
+      fontSize: '16px',
+    },
+  };
+
   const existingPlotOptions = (highchartsOptions.plotOptions as Record<string, Record<string, unknown> | undefined> | undefined) ?? {};
   highchartsOptions.plotOptions = {
     ...existingPlotOptions,
     column: {
       ...(existingPlotOptions.column ?? {}),
+      // Per-segment hover: turn off Highcharts' default sticky tracking so
+      // moving the cursor between stacked sub-columns swaps the tooltip to
+      // the segment under the pointer instead of staying glued to the first
+      // one tracked. Without this, only the top segment of a stack is
+      // hoverable and the lower segments never trigger their own tooltip.
+      stickyTracking: false,
       dataLabels: {
         rotation: -90,
         inside: true,
@@ -484,7 +516,9 @@ function buildChartDisplayData(
         crop: false,
         overflow: 'allow',
         style: {
-          fontSize:    theme.fontSizeSmall,
+          // Match the axis label size (0.8em of the 16px chart base) so the
+          // data label and axis ticks read at the same visual weight.
+          fontSize:    '12.8px',
           fontWeight:  theme.fontWeightBold,
           color:       theme.textOnSeries,
           textOutline: '1px contrast',
@@ -500,41 +534,38 @@ function buildChartDisplayData(
     },
   };
 
+  // Tooltip chrome (bg / border / radius / font / color) is fully covered by
+  // the SDK's Highcharts theme — we only override `shared` + `formatter`.
+  // Per-block tooltip: each stacked segment shows its own tooltip on hover
+  // (one segment = one series = one row). Pair this with
+  // `plotOptions.column.stickyTracking: false` above, otherwise the bottom
+  // stack segment never triggers and the top one keeps the tooltip.
   highchartsOptions.tooltip = {
+    shared: false,
     useHTML: true,
-    backgroundColor: theme.surface,
-    borderColor:     theme.borderSubtle,
-    borderRadius:    parseInt(theme.borderRadiusMd, 10) || 8,
-    borderWidth: 1,
-    shadow: true,
-    padding: 10,
-    style: { color: theme.textPrimary, fontSize: theme.fontSizeBody },
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     formatter: function (this: any) {
-      const point = this.point;
-      const series = point.series;
-      // Suppress the tooltip entirely when the value is zero (or null) so
-      // hovering an empty column doesn't show a "0" reading.
-      if (point.y == null || point.y === 0) return false;
-      const seriesName: string = series.name;
-      const color: string = point.color || series.color || theme.textTertiary;
-      const valueStr = formatSeriesValue(point.y, seriesName);
+      const p = this.point;
+      if (!p || p.y == null || p.y === 0) return false;
+
+      const seriesName: string = p.series.name;
+      const color: string = p.color || p.series.color || theme.textTertiary;
+      const valueStr = formatSeriesValue(p.y, seriesName);
       const unit = unitBySeriesName.get(seriesName) || '';
-      const category = String(point.category ?? '');
+      const row =
+        `<div class="BodySmallRegular" style="display:flex;align-items:center;gap:6px;">` +
+          `<span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:${color};flex-shrink:0;"></span>` +
+          `<span style="color:${theme.textSecondary};">${seriesName} :</span>` +
+          `<span class="BodySmallSemibold" style="color:${theme.textPrimary};">${valueStr}${unit ? ` ${unit}` : ''}</span>` +
+        `</div>`;
+
+      const category = String(p.category ?? '');
       const slot = slotByCategory.get(category);
       const dateRow = slot
-        ? `<div class="BodySmallRegular" style="color:${theme.textTertiary};margin-top:2px;">${formatTooltipDate(slot.from)} - ${formatTooltipDate(slot.to)}</div>`
+        ? `<div class="BodySmallRegular" style="color:${theme.textTertiary};margin-top:4px;">${formatTooltipDate(slot.from)} - ${formatTooltipDate(slot.to)}</div>`
         : '';
-      return (
-        `<div>` +
-          `<div class="BodySmallRegular" style="display:flex;align-items:center;gap:6px;">` +
-            `<span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:${color};flex-shrink:0;"></span>` +
-            `<span style="color:${theme.textSecondary};">${seriesName} :</span>` +
-            `<span class="BodySmallSemibold" style="color:${theme.textPrimary};">${valueStr}${unit ? ` ${unit}` : ''}</span>` +
-          `</div>` +
-          dateRow +
-        `</div>`
-      );
+
+      return `<div>${row}${dateRow}</div>`;
     },
   };
 
@@ -636,6 +667,11 @@ export function ColumnChart({ config = EMPTY_UI_CONFIG, data = [], onEvent, time
     (timeConfig?.pickerType === 'fixed' ? timeConfig.fixedDuration : undefined);
   const availablePeriodicities = durationPeriodicities(selectedDuration, range);
   const [basePeriodicity, setBasePeriodicity] = useState<Periodicity>(() => periodicityFromConfig(timeConfig));
+  // Mutually-exclusive chart-time mode driven by the DatePicker's Shift /
+  // Compare toggles via the SDK's ChartTimeProvider context. 'normal' is the
+  // default; switching to 'shift' implicitly turns 'comparison' off and vice
+  // versa (the provider enforces this).
+  const [chartTimeMode, setChartTimeMode] = useState<ChartTimeMode>('normal');
   const [periodicityOpen, setPeriodicityOpen] = useState(false);
   const [drillPath, setDrillPath] = useState<DrillEntry[]>([]);
 
@@ -652,7 +688,11 @@ export function ColumnChart({ config = EMPTY_UI_CONFIG, data = [], onEvent, time
   const [showLegend,      setShowLegend]      = useState(config.style.showLegend);
   const [showDataLabels,  setShowDataLabels]  = useState(config.style.showDataLabels);
   const [clipping,        setClipping]        = useState(false);
-  const [zoomable,        setZoomable]        = useState(true);
+  // Zoom is permanently on — there's no UI to toggle it. Kept as a const so
+  // any code reading `zoomable` keeps working; the SDK ColumnChart silently
+  // ignores this prop, so the actual zoom enablement happens in
+  // `highchartsOptions.chart.zoomType = 'x'` (see buildChartDisplayData).
+  const zoomable = true;
   const [scrollable,      setScrollable]      = useState(false);
   const [inexactMultiple, setInexactMultiple] = useState(false);
   const widgetElements = config.style.widgetElements ?? {
@@ -662,13 +702,32 @@ export function ColumnChart({ config = EMPTY_UI_CONFIG, data = [], onEvent, time
     hideChartTitle: false,
   };
   const advancedSettings = config.style.advancedSettings;
-  const widgetTitleStyle = advancedSettings?.enabled
-    ? ({
-        '--cc-widget-title-font-size': `${advancedSettings.titleFontSize ?? 20}px`,
-        '--cc-widget-title-color': advancedSettings.titleFontColor ?? 'var(--text-default-primary, #1a1a1a)',
-        '--cc-widget-title-weight': String(fontWeightToCss(advancedSettings.titleFontWeight ?? 'Semi-Bold')),
-      } as CSSProperties)
-    : undefined;
+  // Card wrap — when enabled in the configurator, render the widget shell as
+  // a card with the user-configured background / border-color / border-width
+  // / border-radius. When disabled, the shell renders edge-to-edge with no
+  // background or border (default behavior).
+  const card = config.style.card;
+  // Wrap-in-card defaults to ON — only an explicit `false` turns it off.
+  // Anything else (undefined / not set in legacy envelopes) keeps the card.
+  const cardEnabled = card?.wrapInCard !== false;
+  const cardStyle: CSSProperties = cardEnabled ? {
+    background: card.backgroundColor ?? '#FFFFFF',
+    borderStyle: 'solid',
+    borderColor:  card.borderColor    ?? '#FFFFFF',
+    borderWidth:  `${card.borderWidth  ?? 1}px`,
+    borderRadius: `${card.borderRadius ?? 4}px`,
+    boxSizing: 'border-box',
+  } : {};
+  const widgetTitleStyle: CSSProperties = {
+    ...(advancedSettings?.enabled
+      ? {
+          '--cc-widget-title-font-size': `${advancedSettings.titleFontSize ?? 20}px`,
+          '--cc-widget-title-color': advancedSettings.titleFontColor ?? 'var(--text-default-primary, #1a1a1a)',
+          '--cc-widget-title-weight': String(fontWeightToCss(advancedSettings.titleFontWeight ?? 'Semi-Bold')),
+        } as CSSProperties
+      : {}),
+    ...cardStyle,
+  };
 
   // Debug: log the `data` prop the widget receives from the engine each time it changes.
   useEffect(() => {
@@ -739,7 +798,12 @@ export function ColumnChart({ config = EMPTY_UI_CONFIG, data = [], onEvent, time
   // ── Empty / loading states ────────────────────────────────────────────────
 
   const hasAnyCharts  = (config.charts ?? []).length > 0;
-  const hasAnySeries  = (config.charts ?? []).some((c) => c.series.length > 0);
+  // "Has any data source" = either a regular series OR a fixed series. Both
+  // ride the same UNS binding flow and both render bars on the chart, so a
+  // chart with only fixed series is still a fully-configured chart.
+  const hasAnySeries  = (config.charts ?? []).some(
+    (c) => c.series.length > 0 || c.fixedSeries.length > 0,
+  );
 
   // Pre-configuration: no chart has been created yet via the chart-settings
   // section. Render a clean, header-less EmptyState — no ChartSwitcher, no
@@ -876,9 +940,10 @@ export function ColumnChart({ config = EMPTY_UI_CONFIG, data = [], onEvent, time
 
   const items = (config.charts ?? []).map((chart, ci) => {
     const tabLabel = chart.title || `Chart ${ci + 1}`;
-    // Chart has no data source yet → render the SDK EmptyState as the chart
-    // body so the surrounding header (title + icon container) still appears.
-    if (chart.series.length === 0) {
+    // Chart has no data source yet (neither regular nor fixed) → render the
+    // SDK EmptyState as the chart body so the surrounding header (title +
+    // icon container) still appears.
+    if (chart.series.length === 0 && chart.fixedSeries.length === 0) {
       return {
         id: chart._id || `chart-${ci}`,
         label: tabLabel,
@@ -907,13 +972,15 @@ export function ColumnChart({ config = EMPTY_UI_CONFIG, data = [], onEvent, time
       emitTimeChange(slot.from, slot.to, nextFinerPeriodicity(effectivePeriodicity).toLowerCase());
     }
 
-    const sharedChartProps = {
+    const sharedChartProps: Record<string, unknown> = {
       categories,
       series: resolvedSeries,
       showLegend,
       showDataLabels,
       yAxisUnit,
-      stacked: config.style.stacked,
+      // Auto-stack when the user has configured any Stack for this chart, OR
+      // when the explicit style flag is on (kept for legacy envelopes).
+      stacked: (chart.stacks ?? []).length > 0 || config.style.stacked,
       zoomable,
       scrollable,
       ...(plotLines.length > 0 ? { plotLines } : {}),
@@ -922,6 +989,65 @@ export function ColumnChart({ config = EMPTY_UI_CONFIG, data = [], onEvent, time
       onPointClick: timeDrillDown ? handlePointClick : undefined,
       highchartsOptions,
     };
+
+    // ── Shift mode ──────────────────────────────────────────────────────────
+    // When the user has flipped the DatePicker's Shift toggle AND the time
+    // config carries shifts, reshape per-source data via `buildShiftSeries`
+    // and pass it through the SDK ColumnChart's `shift` prop. The SDK then
+    // renders shift-zoned series + a ShiftLegend chip row.
+    //
+    // Until the mini-engine returns shift-bucketed values, each source's
+    // bucket values land in shift 0 (other shifts get null) — the contract is
+    // wired so the moment the engine starts splitting per shift the chart
+    // picks it up automatically.
+    if (chartTimeMode === 'shift' && timeConfig?.shifts && timeConfig.shifts.length > 0) {
+      const shiftDefs = timeConfig.shifts.map((s) => ({
+        id: s.id, name: s.name, color: s.color,
+        startTime: s.startTime, endTime: s.endTime,
+      }));
+      const enabledIds = new Set(timeConfig.shifts.filter((s) => s.enabled !== false).map((s) => s.id));
+      const buckets = firstPayload?.slots?.length ?? categories.length;
+      const sources = resolvedSeries.map((s, idx) => {
+        const flatValues = (s.data as (number | null)[]).slice(0, buckets);
+        const valuesByShift = shiftDefs.map((_, shiftIdx) =>
+          shiftIdx === 0
+            ? flatValues
+            : (new Array(buckets).fill(null) as (number | null)[])
+        );
+        return { id: resolvedSeries[idx]?.name ?? `source-${idx}`, name: s.name, valuesByShift };
+      });
+      const built = buildShiftSeries({
+        range: { start: new Date(firstPayload?.range?.from ?? 0), end: new Date(firstPayload?.range?.to ?? 0) },
+        periodicity: effectivePeriodicity,
+        shifts: shiftDefs,
+        sources,
+        enabledShiftIds: enabledIds,
+      });
+      sharedChartProps.shift = { series: built.series };
+      sharedChartProps.categories = built.categories;
+      // Top-level series ignored in shift mode per the SDK contract — drop it
+      // to make the intent explicit.
+      delete sharedChartProps.series;
+    }
+
+    // ── Comparison mode ────────────────────────────────────────────────────
+    // When Compare is on, package per-source `current` / `comparison` arrays
+    // through `buildComparisonSeries`. Comparison values come from a second
+    // resolve window the host fetches when the DatePicker emits a comparison
+    // range — until that round-trip is wired, the comparison arrays stay
+    // empty and the chart only renders the current period.
+    if (chartTimeMode === 'comparison') {
+      const sources = resolvedSeries.map((s, idx) => ({
+        id: resolvedSeries[idx]?.name ?? `source-${idx}`,
+        name: s.name,
+        color: s.color,
+        current: (s.data as (number | null)[]).slice(0, categories.length),
+        comparison: new Array(categories.length).fill(null) as (number | null)[],
+      }));
+      const built = buildComparisonSeries({ sources });
+      sharedChartProps.comparison = { series: built.series, showDeviation: true };
+      delete sharedChartProps.series;
+    }
 
     return {
       id: chart._id || `chart-${ci}`,
@@ -954,11 +1080,13 @@ export function ColumnChart({ config = EMPTY_UI_CONFIG, data = [], onEvent, time
     </Breadcrumb>
   ) : undefined;
 
-  // Fixed mode shows the configured fixed-duration's name explicitly so the
-  // user understands they're on a locked window. Other modes (Local/Global)
-  // don't render the duration slot at all — handled at the JSX site.
+  // Fixed mode format: `<durationLabel>: <Periodicity>`. The durationLabel
+  // comes from the user's "Set Duration" name input (presetLabel resolves to
+  // `timeConfig.fixedDuration.label`). Drilldown breadcrumb appends after.
+  // Other modes (Local/Global) don't render this slot — handled at the JSX
+  // site — so the fallback format is kept only as a safety net.
   const durationSlot = timeConfig?.pickerType === 'fixed'
-    ? `Fixed duration: ${presetLabel}${drillPath.length > 0 ? ` › ${drillPath[drillPath.length - 1].label}` : ''}`
+    ? `${presetLabel}: ${effectivePeriodicity}${drillPath.length > 0 ? ` › ${drillPath[drillPath.length - 1].label}` : ''}`
     : `${effectivePeriodicity} · ${presetLabel}${drillPath.length > 0 ? ` › ${drillPath[drillPath.length - 1].label}` : ''}`;
 
   // Fixed and Global time pickers control the window externally, so the widget
@@ -1018,8 +1146,8 @@ export function ColumnChart({ config = EMPTY_UI_CONFIG, data = [], onEvent, time
   // user actually configured one for the active chart.
   const chartDescription = (config.description ?? '').trim();
   const actionsSlot = (
-    <div style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}>
-      {chartDescription && (
+    <div style={{ display: 'inline-flex', alignItems: 'center', gap: 'var(--spacing-03)' }}>
+      {chartDescription && !widgetElements.hideInfoIcon && (
         <Tooltip placement="Bottom" bodyText={chartDescription}>
           <IconButton
             icon={<Info size={16} />}
@@ -1052,7 +1180,6 @@ export function ColumnChart({ config = EMPTY_UI_CONFIG, data = [], onEvent, time
                   <ActionListItem title="Legends"          selectionType="Multiple" isSelected={showLegend}      onClick={() => setShowLegend((v) => !v)} />
                   <ActionListItem title="Data Labels"      selectionType="Multiple" isSelected={showDataLabels}  onClick={() => setShowDataLabels((v) => !v)} />
                   <ActionListItem title="Clipping"         selectionType="Multiple" isSelected={clipping}        isDisabled={inexactMultiple} onClick={() => setClipping((v) => !v)} />
-                  <ActionListItem title="Zoom"             selectionType="Multiple" isSelected={zoomable}        onClick={() => setZoomable((v) => !v)} />
                   <ActionListItem title="Scroll"           selectionType="Multiple" isSelected={scrollable}      onClick={() => setScrollable((v) => !v)} />
                   <ActionListItem title="Inexact Multiple" selectionType="Multiple" isSelected={inexactMultiple} onClick={() => setInexactMultiple((v) => !v)} />
                 </ActionListItemGroup>
@@ -1092,7 +1219,36 @@ export function ColumnChart({ config = EMPTY_UI_CONFIG, data = [], onEvent, time
 
   // ── Render ────────────────────────────────────────────────────────────────
 
+  // ChartTimeProvider auto-discovers the DatePicker's Shift / Compare toggles
+  // from these props — `shifts={[…]}` lights up the Shift switch in the
+  // calendar popover, `comparison={true}` lights up the Compare switch. Both
+  // come from the user's Time tab config (mapped through TimeConfig). When
+  // either array/flag is empty/false the corresponding toggle stays hidden.
+  const ctShifts = (timeConfig?.shifts ?? []).map((s) => ({
+    id: s.id,
+    name: s.name,
+    color: s.color,
+    enabled: s.enabled ?? true,
+  }));
+  const ctComparison = Boolean(timeConfig?.comparisonMode);
+  // Debug: surface what the widget hands to ChartTimeProvider so we can see
+  // whether shifts / comparisonMode actually arrive from the Time tab.
+  // eslint-disable-next-line no-console
+  console.log('[ColumnChart] ChartTime inputs:', {
+    pickerType: timeConfig?.pickerType,
+    shiftsCount: ctShifts.length,
+    comparison: ctComparison,
+    hideDatePicker,
+    hasAnySeries,
+  });
+
   return (
+    <ChartTimeProvider
+      shifts={ctShifts}
+      comparison={ctComparison}
+      mode={chartTimeMode}
+      onModeChange={setChartTimeMode}
+    >
     <div
       className={`cc-widget-shell${advancedSettings?.enabled ? ' cc-widget-shell--title-styled' : ''}`}
       style={widgetTitleStyle}
@@ -1109,9 +1265,22 @@ export function ColumnChart({ config = EMPTY_UI_CONFIG, data = [], onEvent, time
         className={[
           widgetElements.hideChartTitle ? 'cc-widget--hide-title' : '',
           items.length <= 1 ? 'cc-widget--single-chart' : '',
+          // When every header surface is hidden (title + every icon + no
+          // duration + no filters + no breadcrumb), drop the header so the
+          // canvas can fill the freed space.
+          (
+            widgetElements.hideChartTitle
+            && widgetElements.hideSettingsIcon
+            && widgetElements.hideExportIcon
+            && (widgetElements.hideInfoIcon || !chartDescription)
+            && timeConfig?.pickerType !== 'fixed'
+            && !filtersSlot
+            && drillPath.length === 0
+          ) ? 'cc-widget--all-header-hidden' : '',
         ].filter(Boolean).join(' ') || undefined}
         items={items}
       />
     </div>
+    </ChartTimeProvider>
   );
 }

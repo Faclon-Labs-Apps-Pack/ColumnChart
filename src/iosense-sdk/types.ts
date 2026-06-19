@@ -89,6 +89,21 @@ export interface CycleTime {
   month?: string;                 // month name, e.g. "January"
 }
 
+/** Shift definition mirrored from the SDK's GTPShift / ChartTimeShift shapes.
+ *  Threaded through the widget so the DatePicker can light up its Shift toggle
+ *  and so `buildShiftSeries` can bucket data by shift-of-day window. */
+export interface TimeShift {
+  id: string;
+  name: string;
+  color: string;
+  /** "HH:mm" local time-of-day start. */
+  startTime: string;
+  /** "HH:mm" local time-of-day end (may wrap past midnight, e.g. 22:00 → 06:00). */
+  endTime: string;
+  /** Defaults to true when not specified (used by ShiftLegend chip identity). */
+  enabled?: boolean;
+}
+
 export interface TimeConfig {
   timezone: string;
   type: 'local' | 'fixed' | string;
@@ -106,6 +121,12 @@ export interface TimeConfig {
   defaultDurationId: string;
   allDurations: Duration[];
   defaultPeriodicity: 'minute' | 'hourly' | 'daily' | 'weekly' | 'monthly';
+  /** Shifts configured in the time tab — non-empty enables the DatePicker's
+   *  Shift toggle (auto-discovered via ChartTimeProvider). */
+  shifts?: TimeShift[];
+  /** Comparison Mode flag from the time tab — enables the DatePicker's
+   *  Compare toggle (auto-discovered via ChartTimeProvider). */
+  comparisonMode?: boolean;
 }
 
 export type WidgetEvent =
@@ -182,6 +203,7 @@ export interface WidgetElementsConfig {
   hideSettingsIcon: boolean;
   hideExportIcon: boolean;
   hideChartTitle: boolean;
+  hideInfoIcon?: boolean;
 }
 
 export type WidgetFontWeight = 'Regular' | 'Medium' | 'Semi-Bold' | 'Bold';
@@ -197,6 +219,15 @@ export interface WidgetAdvancedSettingsConfig {
   yAxisLineColor: string;
   gridLineColor: string;
   legendTextColor: string;
+  // Data Table sub-section (per the reference style tab) — applies to any
+  // tabular legend/series breakdown view the chart may render.
+  dataTableHeaderBgColor: string;
+  dataTableHeaderTextColor: string;
+  dataTableHeaderTextSize: number;
+  dataTableHeaderTextWeight: WidgetFontWeight;
+  dataTableBaseFontSize: number;
+  dataTableBaseFontWeight: WidgetFontWeight;
+  dataTableBaseFontColor: string;
 }
 
 export interface ChartConfig {
@@ -217,7 +248,14 @@ export interface ColumnChartUIConfig {
   charts: ChartConfig[];
   activeChartId?: string;
   style: {
-    card: { wrapInCard: boolean; bg: string };
+    card: {
+      wrapInCard: boolean;
+      bg: string;
+      backgroundColor?: string;
+      borderColor?: string;
+      borderWidth?: number;
+      borderRadius?: number;
+    };
     stacked: boolean;
     showLegend: boolean;
     showDataLabels: boolean;

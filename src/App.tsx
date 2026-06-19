@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useMemo } from 'react';
 import { ColumnChart } from './components/ColumnChart/ColumnChart';
 import { ColumnChartConfiguration } from './components/ColumnChartConfiguration/ColumnChartConfiguration';
 import { ColumnChartEnvelope, DataEntry, WidgetEvent } from './iosense-sdk/types';
@@ -12,7 +12,9 @@ export default function App() {
   const [data, setData] = useState<DataEntry[]>([]);
   const [auth, setAuth] = useState<string>(localStorage.getItem('bearer_token') ?? '');
   const [timeOverride, setTimeOverride] = useState<{ startTime: number; endTime: number; periodicity?: string } | undefined>(undefined);
-  const widgetSize = envelope?.uiConfig.style.widgetSize ?? { width: 880, height: 400 };
+  // Widget size is fixed at 880×400 in the dev harness regardless of any
+  // widgetSize hint in the envelope.
+  const widgetSize = { width: 880, height: 400 };
 
   useEffect(() => {
     const params = new URLSearchParams(window.location.search);
@@ -32,6 +34,16 @@ export default function App() {
     }
   }, []);
 
+  // Resolve only depends on data-relevant fields — the binding list (which
+  // UNS topics to fetch) and the time config (which window to fetch over).
+  // Style/widget/element changes from the configurator emit a new envelope
+  // every keystroke; without this gate, every color tweak would refire a
+  // 5-6s network round-trip and cause perceived UI lag.
+  const fetchKey = useMemo(() => JSON.stringify({
+    bindings: envelope?.dynamicBindingPathList,
+    timeConfig: envelope?.timeConfig,
+  }), [envelope?.dynamicBindingPathList, envelope?.timeConfig]);
+
   useEffect(() => {
     if (!envelope || !auth) return;
     console.log('[App] resolving envelope:', envelope.dynamicBindingPathList, 'override:', timeOverride);
@@ -39,7 +51,8 @@ export default function App() {
       console.log('[App] resolved data:', resolved);
       setData(resolved);
     });
-  }, [envelope, auth, timeOverride]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [fetchKey, auth, timeOverride]);
 
   function handleEvent(event: WidgetEvent) {
     console.log('[Widget Event]', event);

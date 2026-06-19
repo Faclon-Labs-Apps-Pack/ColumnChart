@@ -65,6 +65,11 @@
   width: 100%;
   background: var(--border-gray-subtle, #e8e8e8);
   margin: var(--spacing-01, 4px) 0;
+  /* Edge-to-edge: cancel the parent block's horizontal padding so the
+     divider spans the full form width. */
+  margin-left: calc(-1 * var(--spacing-05));
+  margin-right: calc(-1 * var(--spacing-05));
+  width: auto;
 }
 
 /* Chart Settings standalone section (no accordion) */
@@ -127,6 +132,20 @@
   color: var(--text-error-default);
 }
 
+/* Any delete IconButton inside the configurator turns red on hover (icon +
+   background tint). Targets aria-label="Delete" so it applies to ListCard
+   trash buttons AND the chart-settings header trash without per-instance
+   classes. Token-driven so it tracks the design system. */
+.cc-config .fds-icon-btn[aria-label="Delete"]:hover,
+.cc-config .fds-icon-btn[aria-label="Delete"]:focus-visible {
+  color: var(--text-error-default);
+  background: var(--background-error-secondary);
+}
+.cc-config .fds-icon-btn[aria-label="Delete"]:hover .fds-icon-btn__icon,
+.cc-config .fds-icon-btn[aria-label="Delete"]:focus-visible .fds-icon-btn__icon {
+  color: var(--text-error-default);
+}
+
 /* Row ListCards inside each accordion — click the whole card to edit, the
    delete-trash only appears on hover. The SDK's trailing slot class is
    `.fds-list-card-trailing` (the wrapper around all ListCardTrailingItems). */
@@ -146,6 +165,27 @@
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+/* Style tab — flat layout (no accordions). Each section is a vertically
+   stacked block with consistent padding; sections are separated by a thin
+   muted divider that matches the SDK's border-gray-subtle token. */
+.cc-config__style-block {
+  display: flex;
+  flex-direction: column;
+  gap: var(--spacing-04, 12px);
+  padding: var(--spacing-05) var(--spacing-05);
+}
+.cc-config__style-section-heading {
+  margin: 0;
+  color: var(--text-gray-primary);
+}
+.cc-config__style-divider {
+  height: 1px;
+  /* Edge-to-edge: zero horizontal margin so the divider runs the full
+     width of the form, matching the rest of the dividers in the configurator. */
+  margin: 0;
+  background: var(--border-gray-subtle);
 }
 
 /* Section body inside Accordion items */

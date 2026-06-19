@@ -38,7 +38,62 @@
   font-weight: var(--cc-widget-title-weight) !important;
 }
 
+/* Hide the chart title — `ChartSwitcher` is now deprecated and forwards
+   to `Chart`, which renders the title as `.fds-chart__title` (either a
+   <button> or <span>). The legacy `.fds-chart-switcher__title` is kept
+   as a fallback for any consumer still on older SDK versions. */
+.cc-widget--hide-title .fds-chart__title,
 .cc-widget--hide-title .fds-chart-switcher__title {
+  display: none;
+}
+
+/* The SDK's `.fds-chart` ships with its own card-like styling
+   (background-color: --background-surface-intense; border; border-radius).
+   That creates a visible "inner card" inside our widget shell, so the
+   card on/off toggle never looks fully turned off. Strip it always — the
+   outer `.cc-widget-shell` is the single source of truth for the card
+   look (its inline style is driven by `wrapInCard` + the user-configured
+   colors / border width / radius). */
+.cc-widget-shell .fds-chart {
+  background-color: transparent;
+  border: none;
+  border-radius: 0;
+}
+
+/* Allow long chart titles to wrap to multiple lines instead of being
+   truncated with an ellipsis. The SDK's default is single-line + ellipsis;
+   we let the text breathe. Force visibility + a generous min-width so
+   the flex chain can't accidentally collapse the label to zero width. */
+.cc-widget-shell:not(.cc-widget--hide-title) .fds-chart__title-label {
+  overflow: visible !important;
+  text-overflow: clip !important;
+  white-space: normal !important;
+  word-break: break-word;
+  max-width: none !important;
+  min-width: 0;
+  flex: 0 1 auto;
+  visibility: visible !important;
+  display: inline !important;
+  color: var(--text-gray-primary);
+}
+/* Make sure the title button itself isn't collapsed by a parent flex
+   container — keep it as an intrinsically-sized inline-flex. */
+.cc-widget-shell:not(.cc-widget--hide-title) .fds-chart__title {
+  flex: 0 0 auto !important;
+  display: inline-flex !important;
+  visibility: visible !important;
+  min-width: 0;
+}
+.cc-widget-shell:not(.cc-widget--hide-title) .fds-chart__view-switcher {
+  display: inline-flex !important;
+  visibility: visible !important;
+}
+
+/* When every header surface is hidden (title + every action icon + no
+   duration + no filters + no breadcrumb) the chart canvas should reclaim
+   the freed space. Drop the header entirely; the canvas already has
+   `flex: 1 1 auto` so it fills the remaining height of the shell. */
+.cc-widget--all-header-hidden .fds-chart__header {
   display: none;
 }
 

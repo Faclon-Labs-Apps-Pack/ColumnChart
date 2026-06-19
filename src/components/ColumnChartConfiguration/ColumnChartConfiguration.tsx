@@ -70,17 +70,96 @@ const WIDGET_SIZE_PRESETS: Record<Exclude<WidgetSizePreset, 'Custom'>, { width: 
 };
 
 const DEFAULT_ADVANCED_SETTINGS: WidgetAdvancedSettingsConfig = {
-  enabled: true,
+  enabled: false,
+  // Chart Title defaults — match the reference Style tab image.
   titleFontSize: 20,
-  titleFontColor: 'var(--text-default-primary, #1a1a1a)',
+  titleFontColor: '#000000',
   titleFontWeight: 'Semi-Bold',
-  xAxisTextColor: 'var(--text-default-primary, #1a1a1a)',
-  xAxisLineColor: '#333333',
-  yAxisTextColor: 'var(--text-default-primary, #1a1a1a)',
-  yAxisLineColor: '#333333',
+  // X axis defaults from the image.
+  xAxisTextColor: '#494B7E',
+  xAxisLineColor: '#888888',
+  // Y axis defaults from the image.
+  yAxisTextColor: '#494B7E',
+  yAxisLineColor: '#888888',
+  // Data Table defaults from the image.
+  dataTableHeaderBgColor:   '#FFFFFF',
+  dataTableHeaderTextColor: '#494B7E',
+  dataTableHeaderTextSize:  14,
+  dataTableHeaderTextWeight: 'Semi-Bold',
+  dataTableBaseFontSize:    14,
+  dataTableBaseFontWeight:  'Regular',
+  dataTableBaseFontColor:   '#494B7E',
+  // Others defaults from the image.
   gridLineColor: '#CCCCCC',
-  legendTextColor: 'var(--text-default-primary, #1a1a1a)',
+  legendTextColor: '#888888',
 };
+
+// Default card border / background values — mirror the image's Style tab.
+const DEFAULT_CARD_STYLE = {
+  backgroundColor: '#FFFFFF',
+  borderColor:     '#FFFFFF',
+  borderWidth:     1,
+  borderRadius:    4,
+};
+
+// Older envelopes may have stored CSS custom-property strings (e.g.
+// "var(--text-default-primary, #1a1a1a)") in color fields back when the
+// configurator used tokens as defaults. The ColorInput expects a plain
+// hex/rgb/named color — when fed a `var(...)` string it shows the raw text.
+// Strip the wrapper and surface the hex fallback so existing widgets render
+// cleanly without forcing the user to re-pick every color.
+// Wrapper around SDK `ColorInput` that hides the leading `#` in the displayed
+// hex string but normalizes the stored value to always include exactly one
+// `#`. Accepts user input with or without `#` (e.g. `3136DD` or `#3136DD`),
+// extra whitespace, and strips any garbage `##` prefixes. Hex characters are
+// otherwise passed through verbatim — the underlying storage stays in the
+// canonical `#RRGGBB` form Highcharts / CSS expect.
+function HexInput({ value, onChange }: { value: string; onChange: (next: string) => void }) {
+  const display = value.replace(/^#+/, '');
+  return (
+    <ColorInput
+      value={display}
+      onChange={(next) => {
+        const stripped = next.replace(/^#+/, '');
+        onChange(stripped ? `#${stripped}` : '');
+      }}
+    />
+  );
+}
+
+function sanitizeColor(value: unknown): string {
+  if (typeof value !== 'string') return '';
+  const trimmed = value.trim();
+  if (!trimmed.startsWith('var(')) return trimmed;
+  // var(--token, fallback) → fallback (anything after the last comma).
+  const inner = trimmed.slice(4, trimmed.lastIndexOf(')'));
+  const lastComma = inner.lastIndexOf(',');
+  return (lastComma >= 0 ? inner.slice(lastComma + 1) : '').trim();
+}
+
+// Apply sanitizeColor to every color field on a WidgetAdvancedSettingsConfig.
+function sanitizeAdvancedSettings(s: Partial<WidgetAdvancedSettingsConfig>): Partial<WidgetAdvancedSettingsConfig> {
+  const cleaned: Partial<WidgetAdvancedSettingsConfig> = { ...s };
+  const colorKeys: (keyof WidgetAdvancedSettingsConfig)[] = [
+    'titleFontColor',
+    'xAxisTextColor',
+    'xAxisLineColor',
+    'yAxisTextColor',
+    'yAxisLineColor',
+    'gridLineColor',
+    'legendTextColor',
+    'dataTableHeaderBgColor',
+    'dataTableHeaderTextColor',
+    'dataTableBaseFontColor',
+  ];
+  colorKeys.forEach((k) => {
+    if (typeof cleaned[k] === 'string') {
+      const fixed = sanitizeColor(cleaned[k]);
+      if (fixed) (cleaned as Record<string, unknown>)[k] = fixed;
+    }
+  });
+  return cleaned;
+}
 
 function getWidgetSizeDimensions(preset: WidgetSizePreset): { width: number; height: number } {
   if (preset === 'Custom') return WIDGET_SIZE_PRESETS.Medium;
@@ -156,6 +235,18 @@ function mapTimeTabToTimeConfig(ttc: TimeTabUIConfig): TimeConfig {
     | TimeConfig['cycleTime']
     | undefined;
 
+  // Shifts and comparisonMode live at the top level of TimeTabUIConfig (Local
+  // picker). Pass them through so the widget's DatePicker can auto-show the
+  // Shift / Compare toggles via SDK's ChartTimeProvider.
+  const shifts = (ttc.shifts ?? []).map((s) => ({
+    id: s.id,
+    name: s.name,
+    color: s.color,
+    startTime: s.startTime,
+    endTime: s.endTime,
+    enabled: true,
+  }));
+
   return {
     timezone: ttc.timezone,
     // Engine still treats global like local (rolling) for data resolution,
@@ -172,6 +263,8 @@ function mapTimeTabToTimeConfig(ttc: TimeTabUIConfig): TimeConfig {
     defaultPeriodicity: (picker === 'fixed' && fd?.periodicity
       ? fd.periodicity.toLowerCase()
       : ttc.defaultPeriodicity) as TimeConfig['defaultPeriodicity'],
+    shifts: shifts.length > 0 ? shifts : undefined,
+    comparisonMode: ttc.comparisonMode,
   };
 }
 
@@ -330,6 +423,10 @@ export function ColumnChartConfiguration(props: ColumnChartConfigurationProps) {
   const [currentTimeConfig,    setCurrentTimeConfig]    = useState<TimeConfig | undefined>(config?.timeConfig);
   const [currentTimeTabConfig, setCurrentTimeTabConfig] = useState<Record<string, unknown> | undefined>(config?.timeTabConfig);
   const [wrapInCard,     setWrapInCard]     = useState(config?.uiConfig?.style?.card?.wrapInCard ?? true);
+  const [cardBackgroundColor, setCardBackgroundColor] = useState(config?.uiConfig?.style?.card?.backgroundColor ?? DEFAULT_CARD_STYLE.backgroundColor);
+  const [cardBorderColor,     setCardBorderColor]     = useState(config?.uiConfig?.style?.card?.borderColor     ?? DEFAULT_CARD_STYLE.borderColor);
+  const [cardBorderWidth,     setCardBorderWidth]     = useState(String(config?.uiConfig?.style?.card?.borderWidth  ?? DEFAULT_CARD_STYLE.borderWidth));
+  const [cardBorderRadius,    setCardBorderRadius]    = useState(String(config?.uiConfig?.style?.card?.borderRadius ?? DEFAULT_CARD_STYLE.borderRadius));
   const [stacked,        setStacked]        = useState(config?.uiConfig?.style?.stacked ?? false);
   const [showLegend,     setShowLegend]     = useState(config?.uiConfig?.style?.showLegend ?? true);
   const [showDataLabels, setShowDataLabels] = useState(config?.uiConfig?.style?.showDataLabels ?? false);
@@ -356,11 +453,14 @@ export function ColumnChartConfiguration(props: ColumnChartConfigurationProps) {
   const [hideSettingsIcon, setHideSettingsIcon] = useState(config?.uiConfig?.style?.widgetElements?.hideSettingsIcon ?? false);
   const [hideExportIcon,   setHideExportIcon]   = useState(config?.uiConfig?.style?.widgetElements?.hideExportIcon ?? false);
   const [hideChartTitle,   setHideChartTitle]   = useState(config?.uiConfig?.style?.widgetElements?.hideChartTitle ?? false);
+  const [hideInfoIcon,     setHideInfoIcon]     = useState(config?.uiConfig?.style?.widgetElements?.hideInfoIcon ?? false);
   const [advancedSettings, setAdvancedSettings] = useState<WidgetAdvancedSettingsConfig>({
     ...DEFAULT_ADVANCED_SETTINGS,
-    ...(config?.uiConfig?.style?.advancedSettings ?? {}),
+    ...sanitizeAdvancedSettings(config?.uiConfig?.style?.advancedSettings ?? {}),
   });
   const [advancedTitleWeightOpen, setAdvancedTitleWeightOpen] = useState(false);
+  const [advancedHeaderWeightOpen, setAdvancedHeaderWeightOpen] = useState(false);
+  const [advancedBaseWeightOpen,   setAdvancedBaseWeightOpen]   = useState(false);
 
   // ── Modal state ───────────────────────────────────────────────────────────
   const configRef = useRef<HTMLDivElement>(null);
@@ -394,8 +494,6 @@ export function ColumnChartConfiguration(props: ColumnChartConfigurationProps) {
   const [formPeriodicityDropdownOpen, setFormPeriodicityDropdownOpen] = useState(false);
 
   // Style tab accordion expanded state
-  const [styleGeneralExpanded, setStyleGeneralExpanded] = useState(false);
-  const [styleChartExpanded,   setStyleChartExpanded]   = useState(false);
 
   useEffect(() => {
     if (config) {
@@ -424,6 +522,10 @@ export function ColumnChartConfiguration(props: ColumnChartConfigurationProps) {
       setEditMode('none');
       setDeleteConfirmOpen(false);
       setWrapInCard(config.uiConfig?.style?.card?.wrapInCard ?? true);
+      setCardBackgroundColor(config.uiConfig?.style?.card?.backgroundColor ?? DEFAULT_CARD_STYLE.backgroundColor);
+      setCardBorderColor(config.uiConfig?.style?.card?.borderColor ?? DEFAULT_CARD_STYLE.borderColor);
+      setCardBorderWidth(String(config.uiConfig?.style?.card?.borderWidth  ?? DEFAULT_CARD_STYLE.borderWidth));
+      setCardBorderRadius(String(config.uiConfig?.style?.card?.borderRadius ?? DEFAULT_CARD_STYLE.borderRadius));
       setStacked(config.uiConfig?.style?.stacked ?? false);
       setShowLegend(config.uiConfig?.style?.showLegend ?? true);
       setShowDataLabels(config.uiConfig?.style?.showDataLabels ?? false);
@@ -453,9 +555,10 @@ export function ColumnChartConfiguration(props: ColumnChartConfigurationProps) {
       setHideSettingsIcon(nextWidgetElements.hideSettingsIcon);
       setHideExportIcon(nextWidgetElements.hideExportIcon);
       setHideChartTitle(nextWidgetElements.hideChartTitle);
+      setHideInfoIcon(nextWidgetElements.hideInfoIcon ?? false);
       setAdvancedSettings({
         ...DEFAULT_ADVANCED_SETTINGS,
-        ...(config.uiConfig?.style?.advancedSettings ?? {}),
+        ...sanitizeAdvancedSettings(config.uiConfig?.style?.advancedSettings ?? {}),
       });
       setAdvancedTitleWeightOpen(false);
       setCurrentTimeConfig(config.timeConfig);
@@ -483,6 +586,10 @@ export function ColumnChartConfiguration(props: ColumnChartConfigurationProps) {
     title?: string;
     description?: string;
     wrapInCard?: boolean;
+    cardBackgroundColor?: string;
+    cardBorderColor?: string;
+    cardBorderWidth?: number;
+    cardBorderRadius?: number;
     stacked?: boolean;
     showLegend?: boolean;
     showDataLabels?: boolean;
@@ -500,7 +607,14 @@ export function ColumnChartConfiguration(props: ColumnChartConfigurationProps) {
       charts:      nextCharts,
       activeChartId: nextActiveChart?._id,
       style: {
-        card: { wrapInCard: overrides.wrapInCard ?? wrapInCard, bg: '' },
+        card: {
+          wrapInCard:      overrides.wrapInCard      ?? wrapInCard,
+          bg:              '',
+          backgroundColor: overrides.cardBackgroundColor ?? cardBackgroundColor,
+          borderColor:     overrides.cardBorderColor     ?? cardBorderColor,
+          borderWidth:     overrides.cardBorderWidth     ?? (Number(cardBorderWidth)  || DEFAULT_CARD_STYLE.borderWidth),
+          borderRadius:    overrides.cardBorderRadius    ?? (Number(cardBorderRadius) || DEFAULT_CARD_STYLE.borderRadius),
+        },
         stacked:        overrides.stacked        ?? stacked,
         showLegend:     overrides.showLegend     ?? showLegend,
         showDataLabels: overrides.showDataLabels ?? showDataLabels,
@@ -614,18 +728,21 @@ export function ColumnChartConfiguration(props: ColumnChartConfigurationProps) {
       hideSettingsIcon,
       hideExportIcon,
       hideChartTitle,
+      hideInfoIcon,
       ...patch,
     };
-    const nextHideWidgetElements = next.hideSettingsIcon || next.hideExportIcon || next.hideChartTitle;
+    const nextHideWidgetElements = next.hideSettingsIcon || next.hideExportIcon || next.hideChartTitle || next.hideInfoIcon;
     if ('hideSettingsIcon' in patch) setHideSettingsIcon(next.hideSettingsIcon);
     if ('hideExportIcon' in patch) setHideExportIcon(next.hideExportIcon);
     if ('hideChartTitle' in patch) setHideChartTitle(next.hideChartTitle);
-    setWidgetElementsEnabled(nextHideWidgetElements);
+    if ('hideInfoIcon' in patch) setHideInfoIcon(next.hideInfoIcon ?? false);
+    setWidgetElementsEnabled(nextHideWidgetElements ?? false);
     emit({ widgetElements: {
-      hideWidgetElements: nextHideWidgetElements,
+      hideWidgetElements: nextHideWidgetElements ?? false,
       hideSettingsIcon: next.hideSettingsIcon,
       hideExportIcon: next.hideExportIcon,
       hideChartTitle: next.hideChartTitle,
+      hideInfoIcon: next.hideInfoIcon,
     }});
   }
 
@@ -1116,6 +1233,7 @@ export function ColumnChartConfiguration(props: ColumnChartConfigurationProps) {
 
       <Tabs
         variant="Bordered"
+        size="Medium"
         value={activeTab}
         onValueChange={(v) => setActiveTab(v as ActiveTab)}
         isFullWidthTabItem
@@ -1225,7 +1343,7 @@ export function ColumnChartConfiguration(props: ColumnChartConfigurationProps) {
                   <Button variant="Gray" label="Cancel" onClick={cancelEdit} />
                   <Button
                     variant="Primary"
-                    label="Save"
+                    label={editMode === 'edit-existing' ? 'Save changes' : 'Save'}
                     isDisabled={!canCommitDraft(draft)}
                     onClick={saveDraft}
                   />
@@ -1527,80 +1645,101 @@ export function ColumnChartConfiguration(props: ColumnChartConfigurationProps) {
         {/* ── Style Tab ── */}
         {activeTab === 'style' && (
           <>
-            <ProductAccordionItem
-              title="General"
-              isExpanded={styleGeneralExpanded}
-              onToggle={() => setStyleGeneralExpanded((v) => !v)}
-            >
-              <div className="cc-config__section">
-                <div className="cc-config__field-row">
-                  <span className="LabelSmallDefault cc-config__field-label">Wrap in card</span>
-                  <Switch
-                    accessibilityLabel="Wrap in card"
-                    isChecked={wrapInCard}
-                    onChange={({ isChecked }) => { setWrapInCard(isChecked); emit({ wrapInCard: isChecked }); }}
-                  />
-                </div>
-              </div>
-            </ProductAccordionItem>
-
-            <ProductAccordionItem
-              title="Chart"
-              isExpanded={styleChartExpanded}
-              onToggle={() => setStyleChartExpanded((v) => !v)}
-            >
-              <div className="cc-config__section">
-                <TextInput
-                  label="Y-axis unit"
-                  placeholder="e.g. kWh, °C, kg"
-                  value={yAxisUnit}
-                  onChange={({ value }) => { setYAxisUnit(value); emit({ yAxisUnit: value }); }}
-                />
-                <div className="cc-config__field-row">
-                  <span className="LabelSmallDefault cc-config__field-label">Stacked columns</span>
-                  <Switch accessibilityLabel="Stacked columns" isChecked={stacked} onChange={({ isChecked }) => { setStacked(isChecked); emit({ stacked: isChecked }); }} />
-                </div>
-                <div className="cc-config__field-row">
-                  <span className="LabelSmallDefault cc-config__field-label">Show legend</span>
-                  <Switch accessibilityLabel="Show legend" isChecked={showLegend} onChange={({ isChecked }) => { setShowLegend(isChecked); emit({ showLegend: isChecked }); }} />
-                </div>
-                <div className="cc-config__field-row">
-                  <span className="LabelSmallDefault cc-config__field-label">Show data labels</span>
-                  <Switch accessibilityLabel="Show data labels" isChecked={showDataLabels} onChange={({ isChecked }) => { setShowDataLabels(isChecked); emit({ showDataLabels: isChecked }); }} />
-                </div>
-              </div>
-            </ProductAccordionItem>
-
-            <div className="cc-config__widget-elements-section">
+            {/* Card-border block. Widget size is fixed at 880×400 in the dev
+                harness — no UI to change it. */}
+            <div className="cc-config__style-block">
               <div className="cc-config__field-row">
-                <span className="SmallSemibold cc-config__field-label">Hide Widget elements</span>
+                <span className="BodySmallSemibold cc-config__style-section-heading">Wrap in card</span>
+                <Switch
+                  accessibilityLabel="Wrap in card"
+                  isChecked={wrapInCard}
+                  onChange={({ isChecked }) => { setWrapInCard(isChecked); emit({ wrapInCard: isChecked }); }}
+                />
               </div>
+
+              {wrapInCard && (
+                <>
+                  <div>
+                    <InputFieldHeader label="Background Color" />
+                    <HexInput value={cardBackgroundColor} onChange={(v) => { setCardBackgroundColor(v); emit({ cardBackgroundColor: v }); }} />
+                  </div>
+                  <div>
+                    <InputFieldHeader label="Border Color" />
+                    <HexInput value={cardBorderColor} onChange={(v) => { setCardBorderColor(v); emit({ cardBorderColor: v }); }} />
+                  </div>
+                  <TextInput
+                    label="Border Width"
+                    type="number"
+                    placeholder="1"
+                    suffix="px"
+                    value={cardBorderWidth}
+                    onChange={({ value }) => { setCardBorderWidth(value); emit({ cardBorderWidth: Number(value) || DEFAULT_CARD_STYLE.borderWidth }); }}
+                  />
+                  <TextInput
+                    label="Border Radius"
+                    type="number"
+                    placeholder="0"
+                    suffix="px"
+                    value={cardBorderRadius}
+                    onChange={({ value }) => { setCardBorderRadius(value); emit({ cardBorderRadius: Number(value) || DEFAULT_CARD_STYLE.borderRadius }); }}
+                  />
+                </>
+              )}
+            </div>
+
+            <div className="cc-config__style-divider" />
+
+            <div className="cc-config__style-block cc-config__widget-elements-section">
+              <p className="BodySmallSemibold cc-config__style-section-heading">Hide Widget Elements</p>
               <CheckboxGroup
                 label=""
                 orientation="Vertical"
                 className="cc-config__widget-elements-group"
               >
                 <Checkbox
+                  size="Medium"
+                  label="Info Icon"
+                  isChecked={hideInfoIcon}
+                  onChange={() => updateWidgetElements({ hideInfoIcon: !hideInfoIcon })}
+                />
+                <Checkbox
+                  size="Medium"
                   label="Settings Icons"
                   isChecked={hideSettingsIcon}
                   onChange={() => updateWidgetElements({ hideSettingsIcon: !hideSettingsIcon })}
                 />
                 <Checkbox
+                  size="Medium"
                   label="Export Icon"
                   isChecked={hideExportIcon}
                   onChange={() => updateWidgetElements({ hideExportIcon: !hideExportIcon })}
                 />
                 <Checkbox
+                  size="Medium"
                   label="Chart Title"
                   isChecked={hideChartTitle}
                   onChange={() => updateWidgetElements({ hideChartTitle: !hideChartTitle })}
                 />
+                <Checkbox
+                  size="Medium"
+                  label="Legend"
+                  isChecked={!showLegend}
+                  onChange={() => { const next = !showLegend; setShowLegend(next); emit({ showLegend: next }); }}
+                />
+                <Checkbox
+                  size="Medium"
+                  label="Data Labels"
+                  isChecked={!showDataLabels}
+                  onChange={() => { const next = !showDataLabels; setShowDataLabels(next); emit({ showDataLabels: next }); }}
+                />
               </CheckboxGroup>
             </div>
 
-            <div className="cc-config__advanced-section">
+            <div className="cc-config__style-divider" />
+
+            <div className="cc-config__style-block cc-config__advanced-section">
               <div className="cc-config__field-row">
-                <span className="SmallSemibold cc-config__field-label cc-config__field-label--bold">Advanced Settings</span>
+                <span className="BodySmallSemibold cc-config__style-section-heading">Advanced Settings</span>
                 <Switch
                   accessibilityLabel="Advanced Settings"
                   isChecked={advancedSettings.enabled}
@@ -1625,7 +1764,7 @@ export function ColumnChartConfiguration(props: ColumnChartConfigurationProps) {
                   />
                   <div>
                     <InputFieldHeader label="Title Font Color" />
-                    <ColorInput
+                    <HexInput
                       value={advancedSettings.titleFontColor}
                       onChange={(value) => updateAdvancedSettings({ titleFontColor: value })}
                     />
@@ -1662,14 +1801,14 @@ export function ColumnChartConfiguration(props: ColumnChartConfigurationProps) {
                   <p className="LabelMediumDefault cc-config__advanced-heading">X Axis</p>
                   <div>
                     <InputFieldHeader label="Axis Text Color" />
-                    <ColorInput
+                    <HexInput
                       value={advancedSettings.xAxisTextColor}
                       onChange={(value) => updateAdvancedSettings({ xAxisTextColor: value })}
                     />
                   </div>
                   <div>
                     <InputFieldHeader label="Axis Line Color" />
-                    <ColorInput
+                    <HexInput
                       value={advancedSettings.xAxisLineColor}
                       onChange={(value) => updateAdvancedSettings({ xAxisLineColor: value })}
                     />
@@ -1680,14 +1819,14 @@ export function ColumnChartConfiguration(props: ColumnChartConfigurationProps) {
                   <p className="LabelMediumDefault cc-config__advanced-heading">Y Axis</p>
                   <div>
                     <InputFieldHeader label="Axis Text Color" />
-                    <ColorInput
+                    <HexInput
                       value={advancedSettings.yAxisTextColor}
                       onChange={(value) => updateAdvancedSettings({ yAxisTextColor: value })}
                     />
                   </div>
                   <div>
                     <InputFieldHeader label="Axis Line Color" />
-                    <ColorInput
+                    <HexInput
                       value={advancedSettings.yAxisLineColor}
                       onChange={(value) => updateAdvancedSettings({ yAxisLineColor: value })}
                     />
@@ -1698,14 +1837,14 @@ export function ColumnChartConfiguration(props: ColumnChartConfigurationProps) {
                   <p className="LabelMediumDefault cc-config__advanced-heading">Others</p>
                   <div>
                     <InputFieldHeader label="Grid Line Color" />
-                    <ColorInput
+                    <HexInput
                       value={advancedSettings.gridLineColor}
                       onChange={(value) => updateAdvancedSettings({ gridLineColor: value })}
                     />
                   </div>
                   <div>
                     <InputFieldHeader label="Legend Text Color" />
-                    <ColorInput
+                    <HexInput
                       value={advancedSettings.legendTextColor}
                       onChange={(value) => updateAdvancedSettings({ legendTextColor: value })}
                     />
@@ -1797,7 +1936,7 @@ export function ColumnChartConfiguration(props: ColumnChartConfigurationProps) {
             <Button
               variant="Primary"
               label={
-                editingId ? 'Save'
+                editingId ? 'Save changes'
                 : modalSection === 'series'   ? 'Add Data Source'
                 : modalSection === 'fixed'    ? 'Add Fixed Series'
                 : modalSection === 'plotBand' ? 'Add Plot Band'
@@ -1836,7 +1975,7 @@ export function ColumnChartConfiguration(props: ColumnChartConfigurationProps) {
                 />
                 <div>
                   <InputFieldHeader label="Color" necessityIndicator="required" />
-                  <ColorInput value={formColor} onChange={(v) => setFormColor(v)} />
+                  <HexInput value={formColor} onChange={(v) => setFormColor(v)} />
                 </div>
                 <UNSPathInput
                   label="UNS Path"
@@ -1865,7 +2004,7 @@ export function ColumnChartConfiguration(props: ColumnChartConfigurationProps) {
                 {/* 3. Color */}
                 <div>
                   <InputFieldHeader label="Color" necessityIndicator="required" />
-                  <ColorInput value={formColor} onChange={(v) => setFormColor(v)} />
+                  <HexInput value={formColor} onChange={(v) => setFormColor(v)} />
                 </div>
                 {/* 4. Line style */}
                 <div className="cc-series-modal__two-col">
@@ -1961,7 +2100,7 @@ export function ColumnChartConfiguration(props: ColumnChartConfigurationProps) {
                 <TextInput label="Name" necessityIndicator="required" isRequired placeholder="e.g. Overload Zone" value={formLabel} onChange={({ value }) => setFormLabel(value)} />
                 <div>
                   <InputFieldHeader label="Color" necessityIndicator="required" />
-                  <ColorInput value={formColor} onChange={(v) => setFormColor(v)} />
+                  <HexInput value={formColor} onChange={(v) => setFormColor(v)} />
                 </div>
                 <div className="cc-series-modal__two-col">
                   <UNSPathInput label="Start value" necessityIndicator="required" isRequired placeholder="Start value" value={formFrom} tree={unsTree} isLoading={isLoadingTree} onChange={(v: string) => setFormFrom(resolveUNSValue(v))} onOpen={() => loadWorkspaces()} />

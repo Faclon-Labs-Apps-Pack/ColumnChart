@@ -43,8 +43,18 @@ export async function resolve(
   }
 
   try {
-    const timeFrame = ctx.override?.periodicity
-      ? PERIODICITY_TIME_FRAME[ctx.override.periodicity.toLowerCase()]
+    // Periodicity precedence: explicit override (user picked a periodicity in
+    // the date picker → TIME_CHANGE event → host puts it in ctx.override) wins
+    // over the envelope default. The fallback matters for the very first
+    // resolve: the widget initializes its dropdown to
+    // timeConfig.defaultPeriodicity but does NOT emit TIME_CHANGE on mount —
+    // without this fallback, the initial request goes with no timeFrame and
+    // the server hands back its own default (hourly), making the dropdown
+    // disagree with the bars on screen.
+    const periodicity = ctx.override?.periodicity
+      ?? envelope.timeConfig?.defaultPeriodicity;
+    const timeFrame = periodicity
+      ? PERIODICITY_TIME_FRAME[periodicity.toLowerCase()]
       : undefined;
 
     const items = await resolveAndCompute(
