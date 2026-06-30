@@ -793,6 +793,8 @@ function periodicityFromConfig(timeConfig?: TimeConfig): Periodicity {
 // ── Component ─────────────────────────────────────────────────────────────────
 
 export function ColumnChart({ config = EMPTY_UI_CONFIG, data = [], comparisonData = [], onEvent, timeConfig }: ColumnChartProps) {
+  // eslint-disable-next-line no-console
+  console.log('[ColumnChart] props received', { config, data, comparisonData, timeConfig });
   const chartRef = useRef<unknown>(null);
   // Guard: selecting a preset in the SDK DatePicker also fires onRangeChange;
   // this prevents that from clearing the preset / re-emitting (matches GTP).
