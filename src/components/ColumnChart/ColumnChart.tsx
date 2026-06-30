@@ -3,6 +3,7 @@ import { createPortal } from 'react-dom';
 import { ColumnChart as ColumnChartDisplay } from '@faclon-labs/design-sdk/ColumnChart';
 import { LineChart } from '@faclon-labs/design-sdk/LineChart';
 import { AreaChart } from '@faclon-labs/design-sdk/AreaChart';
+import { ComboLineChart } from '@faclon-labs/design-sdk/ComboLineChart';
 import { ChartSwitcher } from '@faclon-labs/design-sdk/ChartSwitcher';
 import { exportChart } from '@faclon-labs/design-sdk/Chart';
 import type { ChartExportFormat } from '@faclon-labs/design-sdk/Chart';
@@ -14,8 +15,8 @@ import { DropdownMenu, ActionListItem, ActionListItemGroup } from '@faclon-labs/
 import { IconButton } from '@faclon-labs/design-sdk/IconButton';
 import { Home, Settings, Menu, Info } from 'react-feather';
 import { Tooltip } from '@faclon-labs/design-sdk/Tooltip';
-import { EmptyState, NoDataOneIllustration } from '@faclon-labs/design-sdk/EmptyState';
-import { ChartTimeProvider, buildShiftSeries, buildComparisonSeries } from '@faclon-labs/design-sdk';
+import { EmptyState, NoDataOneIllustration, AddWidgetIllustration } from '@faclon-labs/design-sdk/EmptyState';
+import { ChartTimeProvider, buildShiftSeries, buildComparisonSeries, type DeviationPattern } from '@faclon-labs/design-sdk';
 import type { ChartTimeMode } from '@faclon-labs/design-sdk';
 import {
   DataEntry,
@@ -34,6 +35,9 @@ import './ColumnChart.css';
 interface ColumnChartProps {
   config?: ColumnChartUIConfig;
   data?: DataEntry[];
+  /** Comparison-period data (the prior window), resolved by the engine when
+   *  Comparison Mode is on. Same keys/shape as `data`. */
+  comparisonData?: DataEntry[];
   onEvent: (event: WidgetEvent) => void;
   timeConfig?: TimeConfig;
 }
@@ -62,7 +66,7 @@ function getAvailablePeriodicities(range: DateRange): Periodicity[] {
   const days = (range.end.getTime() - range.start.getTime()) / 86_400_000;
   if (days <= 2)   return ['Hourly'];
   if (days <= 31)  return ['Hourly', 'Daily'];
-  if (days <= 180) return ['Daily', 'Weekly'];
+  if (days <= 180) return ['Daily', 'Weekly', 'Monthly'];   // Monthly for quarter windows
   return ['Daily', 'Weekly', 'Monthly'];
 }
 
@@ -223,8 +227,8 @@ interface ChartDisplayData {
   resolvedSeries: { name: string; data: any[]; color?: string; yAxis?: number }[];
   resolvedSeriesIds: string[];
   categories: string[];
-  plotLines: { value: number; label?: string; color?: string; width?: number; dashStyle?: DashStyle }[];
-  plotBands: { from: number; to: number; label?: string; color?: string }[];
+  plotLines: { value: number; label?: string; color?: string; width?: number; dashStyle?: DashStyle; yAxis?: 0 | 1 }[];
+  plotBands: { from: number; to: number; label?: string; color?: string; yAxis?: 0 | 1 }[];
   yAxisUnit: string | undefined;
   firstPayload: SeriesPayload | null;
   highchartsOptions: Record<string, unknown>;
@@ -311,7 +315,8 @@ function buildChartDisplayData(
         ...(p.width !== undefined ? { width: p.width } : {}),
         // Default to a solid line so the rendered style matches the
         // configurator default ("Solid"). The SDK otherwise defaults to Dash.
-        dashStyle: (p.dashStyle ?? 'Solid') as DashStyle };
+        dashStyle: (p.dashStyle ?? 'Solid') as DashStyle,
+        yAxis: (p.yAxis ?? 0) as 0 | 1 };
     })
     .filter((p): p is NonNullable<typeof p> => p !== null);
 
@@ -320,7 +325,7 @@ function buildChartDisplayData(
       const from = resolveNumeric(`charts[${ci}].plotBands[${i}].from`, p.from);
       const to   = resolveNumeric(`charts[${ci}].plotBands[${i}].to`,   p.to);
       if (from === null || to === null || to <= from) return null;
-      return { from, to, label: p.label || undefined, color: p.color || undefined };
+      return { from, to, label: p.label || undefined, color: p.color || undefined, yAxis: (p.yAxis ?? 0) as 0 | 1 };
     })
     .filter((p): p is NonNullable<typeof p> => p !== null);
 
@@ -346,7 +351,14 @@ function buildChartDisplayData(
     ...(p.label ? { label: { text: p.label, align: 'right' } } : {}),
   }));
 
-  const hasRightAxis = resolvedSeries.some((s) => s.yAxis === 1);
+  // Auto-hide derives from "does this axis own any plotted series" — there is
+  // no stored visible flag. Left owns ≥1 series → left visible; same for right.
+  const leftHasSeries  = resolvedSeries.some((s) => (s.yAxis ?? 0) === 0);
+  const hasRightAxis   = resolvedSeries.some((s) => s.yAxis === 1);
+  // The Right axis entry is included when the chart has a Right axis configured
+  // OR a resolved right-pinned series. Right-pinned plot lines/bands fold back
+  // to the left when no Right axis exists (safety net for stale `yAxis: 1`).
+  const rightAxisExists = hasRightAxis || (chart.axes ?? []).some((a) => a.yAxis === 1);
   const hasStacks    = (chart.stacks ?? []).some((st) => st.seriesIds.length > 1);
   const hasAxes      = (chart.axes ?? []).length > 0;
   const needsSeriesOverride = hasRightAxis || hasStacks || hasAxes;
@@ -356,15 +368,31 @@ function buildChartDisplayData(
   const advancedSettings = config.style.advancedSettings;
   const highchartsOptions: Record<string, unknown> = {};
 
+  // Split plot lines/bands by their axis. hcPlotLines/hcPlotBands are 1:1 with
+  // plotLines/plotBands, so indices align. Right-pinned items fold to left when
+  // no Right axis exists.
+  const onRight = (ax: 0 | 1 | undefined) => rightAxisExists && ax === 1;
+  const leftHcPlotLines  = hcPlotLines.filter((_, i) => !onRight(plotLines[i].yAxis));
+  const rightHcPlotLines = hcPlotLines.filter((_, i) => onRight(plotLines[i].yAxis));
+  const leftHcPlotBands  = hcPlotBands.filter((_, i) => !onRight(plotBands[i].yAxis));
+  const rightHcPlotBands = hcPlotBands.filter((_, i) => onRight(plotBands[i].yAxis));
+
   if (needsSeriesOverride) {
     const yAxisBase = hasRightAxis || hasAxes
       ? [
           {
             title: { text: leftAxisName || yAxisUnit || '' },
-            ...(hcPlotLines.length > 0 ? { plotLines: hcPlotLines } : {}),
-            ...(hcPlotBands.length > 0 ? { plotBands: hcPlotBands } : {}),
+            visible: leftHasSeries,
+            ...(leftHcPlotLines.length > 0 ? { plotLines: leftHcPlotLines } : {}),
+            ...(leftHcPlotBands.length > 0 ? { plotBands: leftHcPlotBands } : {}),
           },
-          { title: { text: rightAxisName || '' }, opposite: true },
+          ...(rightAxisExists ? [{
+            title: { text: rightAxisName || '' },
+            opposite: true,
+            visible: hasRightAxis,
+            ...(rightHcPlotLines.length > 0 ? { plotLines: rightHcPlotLines } : {}),
+            ...(rightHcPlotBands.length > 0 ? { plotBands: rightHcPlotBands } : {}),
+          }] : []),
         ]
       : undefined;
 
@@ -572,6 +600,48 @@ function buildChartDisplayData(
   return { resolvedSeries, resolvedSeriesIds, categories, plotLines, plotBands, yAxisUnit, firstPayload, highchartsOptions };
 }
 
+// Build the ComboLineChart `comparison` sources for a chart: per regular series,
+// the current-period values (from `data`) aligned with the comparison-period
+// values (from `comparisonData`). Per-source polarity comes from
+// `overrides[`${chartId}:${seriesId}`]`, else the chart-wide default. Fixed
+// series have no comparison window, so they're excluded.
+function buildChartComparison(
+  chart: ChartConfig,
+  ci: number,
+  data: DataEntry[],
+  comparisonData: DataEntry[],
+  overrides?: Record<string, DeviationPattern>,
+) {
+  const curPayloads = chart.series.map((_, i) => getSeriesData(`charts[${ci}].series[${i}].unsPath`, data));
+  const cmpPayloads = chart.series.map((_, i) => getSeriesData(`charts[${ci}].series[${i}].unsPath`, comparisonData));
+
+  const categories = curPayloads.find(Boolean)?.slots.map((s) => s.label) ?? [];
+  const comparisonCategories = cmpPayloads.find(Boolean)?.slots.map((s) => s.label) ?? [];
+  const n = categories.length;
+  const pad = (arr: (number | null)[]) => {
+    const out = arr.slice(0, n);
+    while (out.length < n) out.push(null);
+    return out;
+  };
+
+  const sources = chart.series.map((s, i) => {
+    const cur = curPayloads[i] ? curPayloads[i]!.slots.map((sl) => sl.value ?? null) : new Array(n).fill(null);
+    const cmp = cmpPayloads[i] ? cmpPayloads[i]!.slots.map((sl) => sl.value ?? null) : new Array(n).fill(null);
+    const override = overrides?.[`${chart._id}:${s._id}`];
+    return {
+      id: s._id,
+      name: s.label || `Series ${i + 1}`,
+      current: pad(cur),
+      comparison: pad(cmp),
+      seriesType: 'column' as const,
+      ...(s.color ? { color: s.color } : {}),
+      ...(override ? { deviationPattern: override } : {}),
+    };
+  });
+
+  return { sources, categories, comparisonCategories };
+}
+
 // ── Time-config → date-picker mapping ──────────────────────────────────────────
 
 interface InitialTime {
@@ -637,6 +707,24 @@ const DATEPICKER_PRESET_LABELS: Record<string, string> = {
   previous_year: 'Previous Year',
 };
 
+// The SDK DatePicker picks its preset list as `presets ?? DEFAULT_PRESETS` — a
+// fallback, not a merge — so passing our configured durations would hide all
+// built-ins. `DEFAULT_PRESETS` isn't re-exported, so we mirror the built-in
+// ids/labels here and merge them with the configured durations ourselves. The
+// window for each built-in still comes from the SDK's `getPresetDateRange`.
+const BUILTIN_PRESETS: Array<{ id: string; label: string }> = [
+  { id: 'today',             label: 'Today' },
+  { id: 'yesterday',         label: 'Yesterday' },
+  { id: 'current_week',      label: 'Current Week' },
+  { id: 'previous_7_days',   label: 'Past 7 days' },
+  { id: 'current_month',     label: 'Current Month' },
+  { id: 'previous_month',    label: 'Previous Month' },
+  { id: 'previous_3_month',  label: 'Previous 3 Month' },
+  { id: 'previous_12_month', label: 'Previous 12 Month' },
+  { id: 'current_year',      label: 'Current Year' },
+  { id: 'previous_year',     label: 'Previous Year' },
+];
+
 function periodicityFromConfig(timeConfig?: TimeConfig): Periodicity {
   switch (timeConfig?.defaultPeriodicity) {
     case 'minute':
@@ -650,11 +738,16 @@ function periodicityFromConfig(timeConfig?: TimeConfig): Periodicity {
 
 // ── Component ─────────────────────────────────────────────────────────────────
 
-export function ColumnChart({ config = EMPTY_UI_CONFIG, data = [], onEvent, timeConfig }: ColumnChartProps) {
+export function ColumnChart({ config = EMPTY_UI_CONFIG, data = [], comparisonData = [], onEvent, timeConfig }: ColumnChartProps) {
   const chartRef = useRef<unknown>(null);
   // Guard: selecting a preset in the SDK DatePicker also fires onRangeChange;
   // this prevents that from clearing the preset / re-emitting (matches GTP).
   const presetSelectingRef = useRef(false);
+  // Comparison window picked in the date picker's Compare panel. Kept in a ref
+  // (read by emitTimeChange) because the SDK fires the main + comparison range
+  // callbacks separately on Apply.
+  const compRangeRef = useRef<{ start: Date; end: Date } | null>(null);
+  const [compRange, setCompRange] = useState<{ start: Date; end: Date } | null>(null);
 
   const [preset, setPreset] = useState(() => initialTimeFromConfig(timeConfig).presetId);
   const [presetLabel, setPresetLabel] = useState(() => initialTimeFromConfig(timeConfig).presetLabel);
@@ -672,6 +765,12 @@ export function ColumnChart({ config = EMPTY_UI_CONFIG, data = [], onEvent, time
   // default; switching to 'shift' implicitly turns 'comparison' off and vice
   // versa (the provider enforces this).
   const [chartTimeMode, setChartTimeMode] = useState<ChartTimeMode>('normal');
+  // Comparison settings derived from the time config. `compareOn` reflects the
+  // provider's active mode (ChartTimeProvider enforces Shift/Compare exclusion).
+  const comparisonModeOn  = Boolean(timeConfig?.comparisonMode);
+  const compareOn         = chartTimeMode === 'comparison';
+  const deviationPattern  = (timeConfig?.deviationPattern ?? 'green-up-positive') as DeviationPattern;
+  const perSourceOverrides = timeConfig?.allowPerSourceIndicator ? timeConfig?.sourceDeviationOverrides : undefined;
   const [periodicityOpen, setPeriodicityOpen] = useState(false);
   const [drillPath, setDrillPath] = useState<DrillEntry[]>([]);
 
@@ -761,12 +860,24 @@ export function ColumnChart({ config = EMPTY_UI_CONFIG, data = [], onEvent, time
     timeConfig?.defaultPeriodicity,
     JSON.stringify(timeConfig?.fixedDuration ?? null),
     JSON.stringify(timeConfig?.cycleTime ?? null),
+    // Editing a duration (same id, new length/periodicity) must re-resolve the
+    // local picker range — without this the picker wouldn't move on edit.
+    JSON.stringify(timeConfig?.allDurations ?? []),
   ]);
 
   useEffect(() => {
+    // Periodicity in fixed/global is config-driven — don't clobber it. Only the
+    // local picker snaps to the DEFAULT (first available) periodicity when the
+    // current one isn't valid for the new range, and re-emits so data refetches.
+    if ((timeConfig?.pickerType ?? 'local') !== 'local') return;
     if (!availablePeriodicities.includes(basePeriodicity)) {
-      setBasePeriodicity(availablePeriodicities[availablePeriodicities.length - 1]);
+      const next = availablePeriodicities[0];
+      if (next) {
+        setBasePeriodicity(next);
+        emitTimeChange(range.start.getTime(), range.end.getTime(), next.toLowerCase());
+      }
     }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [range]);
 
   useEffect(() => {
@@ -838,14 +949,29 @@ export function ColumnChart({ config = EMPTY_UI_CONFIG, data = [], onEvent, time
   const effectivePeriodicity: Periodicity = LEVEL_ORDER[effectiveIdx];
 
   function emitTimeChange(startTime: number, endTime: number, periodicity: string) {
+    // Ride the picked comparison window into the payload (only when Compare is
+    // on) so the host fetches that exact prior window.
+    const cr = compareOn ? compRangeRef.current : null;
     onEvent({
       type: 'TIME_CHANGE',
       payload: {
         startTime: String(startTime),
         endTime:   String(endTime),
         periodicity,
+        ...(cr ? {
+          comparisonStartTime: String(cr.start.getTime()),
+          comparisonEndTime:   String(cr.end.getTime()),
+        } : {}),
       },
     });
+  }
+
+  // The picker fires the comparison-range callback separately on Apply — stash
+  // the window and re-emit so the host refetches with it.
+  function handleComparisonRangeChange(cr: { start: Date; end: Date } | null) {
+    compRangeRef.current = cr;
+    setCompRange(cr);
+    if (cr) emitTimeChange(range.start.getTime(), range.end.getTime(), basePeriodicity.toLowerCase());
   }
 
   function handleRangeChange(r: DateRange | null) {
@@ -857,19 +983,25 @@ export function ColumnChart({ config = EMPTY_UI_CONFIG, data = [], onEvent, time
     }
     if (!r) return;
     setRange(r);
-    setPreset('');          // manual range pick → no preset selected
-    setPresetLabel('Custom');
     setDrillPath([]);
     emitTimeChange(r.start.getTime(), r.end.getTime(), basePeriodicity.toLowerCase());
+    // `preset` / `presetLabel` are owned ONLY by onPresetSelect — the SDK fires
+    // onPresetSelect('custom') itself for a manual range/day pick. Touching them
+    // here made a named built-in preset's chip fall back to "Custom" (the SDK
+    // echoes onRangeChange after applying a preset).
   }
 
-  // Preset list shown in the date picker = the durations configured in the
-  // time tab (timeConfig.allDurations), nothing else. Falls back to the
-  // picker's built-ins only when no durations are configured (e.g. dev harness).
+  // Preset list = the configured durations FIRST, then every built-in not
+  // already present. Always passed to the picker (no length gate) so the SDK's
+  // built-ins stay visible alongside the user's durations.
   const durationPresets = (timeConfig?.allDurations ?? []).map((d) => ({
     label: d.label || d.id,
     value: d.id,
   }));
+  const builtinPresetOptions = BUILTIN_PRESETS
+    .filter((b) => !durationPresets.some((d) => d.value === b.id))
+    .map((b) => ({ label: b.label, value: b.id }));
+  const presetOptions = [...durationPresets, ...builtinPresetOptions];
 
   // Selecting a configured duration: the date picker can't resolve a custom
   // duration id itself (its getPresetDateRange only knows built-ins), so we
@@ -951,7 +1083,7 @@ export function ColumnChart({ config = EMPTY_UI_CONFIG, data = [], onEvent, time
         children: (
           <div className="cc-widget__empty-body">
             <EmptyState
-              illustration={<NoDataOneIllustration />}
+              illustration={<AddWidgetIllustration />}
               title="No data source configured"
               description="Add a data source from the configurator to populate this chart."
             />
@@ -1031,22 +1163,33 @@ export function ColumnChart({ config = EMPTY_UI_CONFIG, data = [], onEvent, time
     }
 
     // ── Comparison mode ────────────────────────────────────────────────────
-    // When Compare is on, package per-source `current` / `comparison` arrays
-    // through `buildComparisonSeries`. Comparison values come from a second
-    // resolve window the host fetches when the DatePicker emits a comparison
-    // range — until that round-trip is wired, the comparison arrays stay
-    // empty and the chart only renders the current period.
-    if (chartTimeMode === 'comparison') {
-      const sources = resolvedSeries.map((s, idx) => ({
-        id: resolvedSeries[idx]?.name ?? `source-${idx}`,
-        name: s.name,
-        color: s.color,
-        current: (s.data as (number | null)[]).slice(0, categories.length),
-        comparison: new Array(categories.length).fill(null) as (number | null)[],
-      }));
-      const built = buildComparisonSeries({ sources });
-      sharedChartProps.comparison = { series: built.series, showDeviation: true };
-      delete sharedChartProps.series;
+    // When Compare is the active mode, the master switch is on, and the engine
+    // returned a comparison window, render through ComboLineChart — the only SDK
+    // chart with the current-vs-comparison + ▲/▼ deviation tooltip contract.
+    // `buildChartComparison` aligns current (data) and comparison
+    // (comparisonData) values by category; per-source polarity overrides apply
+    // only when Advance Settings is on. (Plot lines/bands aren't passed here, so
+    // they don't render in comparison mode — by design.)
+    const comparisonOn = comparisonModeOn && compareOn && comparisonData.length > 0;
+    if (comparisonOn) {
+      const cmp = buildChartComparison(chart, ci, data, comparisonData, perSourceOverrides);
+      const { series } = buildComparisonSeries({ sources: cmp.sources, deviationPattern });
+      return {
+        id: chart._id || `chart-${ci}`,
+        label: tabLabel,
+        type: 'column' as const,
+        children: (
+          <ComboLineChart
+            bare
+            categories={cmp.categories}
+            comparison={{ series, showDeviation: true, comparisonCategories: cmp.comparisonCategories }}
+            showLegend={showLegend}
+            showDataLabels={showDataLabels}
+            yAxisUnit={config.style.yAxisUnit || undefined}
+            scrollable={scrollable}
+          />
+        ),
+      };
     }
 
     return {
@@ -1111,9 +1254,13 @@ export function ColumnChart({ config = EMPTY_UI_CONFIG, data = [], onEvent, time
         placeholder="Select range"
         rangeValue={range}
         selectedPreset={preset}
-        {...(durationPresets.length > 0 ? { presets: durationPresets } : {})}
+        presets={presetOptions}
         onPresetSelect={handlePresetSelect}
         onRangeChange={handleRangeChange}
+        {...(comparisonModeOn ? {
+          comparisonRangeValue: compRange,
+          onComparisonRangeChange: handleComparisonRangeChange,
+        } : {})}
       />
       <div style={{ width: 120 }}>
         <SelectInput

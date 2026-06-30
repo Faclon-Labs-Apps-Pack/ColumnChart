@@ -213,6 +213,26 @@
   font-style: italic;
 }
 
+/* When per-source deviation indicators are on, the chart-wide deviation cards
+   are redundant — grey them out. */
+.cc-config__time-tab--per-source .fds-ttc__deviation {
+  opacity: 0.45;
+  pointer-events: none;
+}
+
+/* Axis hint: info icon + text on one row. */
+.cc-config__axis-hint {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--spacing-02, 6px);
+  font-style: normal;
+}
+
+.cc-config__axis-hint svg {
+  flex-shrink: 0;
+  margin-top: 1px;
+}
+
 
 /* Inline card (PlotLine, PlotBand, Stack) */
 .cc-config__inline-card {

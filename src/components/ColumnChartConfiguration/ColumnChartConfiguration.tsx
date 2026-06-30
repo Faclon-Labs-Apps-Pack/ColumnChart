@@ -20,7 +20,7 @@ import { Tag } from '@faclon-labs/design-sdk/Tag';
 import { Badge } from '@faclon-labs/design-sdk/Badge';
 import { Checkbox, CheckboxGroup } from '@faclon-labs/design-sdk/Checkbox';
 import { Tooltip } from '@faclon-labs/design-sdk/Tooltip';
-import { Edit2, Trash2, Plus, ArrowLeft, Lock, Unlock } from 'react-feather';
+import { Edit2, Trash2, Plus, ArrowLeft, Lock, Unlock, Info } from 'react-feather';
 import {
   ColumnChartEnvelope,
   ColumnChartUIConfig,
@@ -31,6 +31,8 @@ import {
   PlotLinePeriodicity,
   PlotBandConfig,
   AxisConfig,
+  LEFT_AXIS_ID,
+  RIGHT_AXIS_ID,
   StackConfig,
   WidgetSizeConfig,
   WidgetSizePreset,
@@ -202,6 +204,41 @@ function buildDynamicBindingPathList(
   return paths;
 }
 
+// Sensible "start of calendar period" defaults for the Cycle Time form so it
+// never renders blank. Idempotent — any field the user has set is preserved;
+// only blanks are filled. String fields use `||` (so an empty string also
+// fills); `dayOfWeek` is numeric where 0 is a valid Sunday, so it uses `== null`;
+// `year` uses `??` so an explicit '' is kept.
+function fillCycleDefaults(ct: Record<string, unknown> | undefined): Record<string, unknown> {
+  const c = ct ?? {};
+  return {
+    cycleTimeType: c.cycleTimeType || 'calendar',
+    identifier:    c.identifier    || 'start',
+    hour:          c.hour          || '00',
+    minute:        c.minute        || '00',
+    dayOfWeek:     c.dayOfWeek == null ? 1 : c.dayOfWeek,   // 1 = Monday
+    date:          c.date          || '1',
+    month:         c.month         || '1',                  // January (calendar year start)
+    year:          c.year ?? '',
+  };
+}
+
+// Picker-aware wrapper: Local fills top-level cycleTime, Fixed fills
+// fixed.cycleTime, Global inherits from the linked GTP (read-only) so it's
+// left alone. Routes on linkTimeWith ?? timeType — no extra branching needed.
+function withCycleDefaults<T extends Record<string, unknown> | undefined>(ttc: T): T {
+  if (!ttc) return ttc;
+  const picker = (ttc.linkTimeWith ?? ttc.timeType ?? 'local') as string;
+  if (picker === 'fixed') {
+    const fixed = (ttc.fixed ?? {}) as Record<string, unknown>;
+    return { ...ttc, fixed: { ...fixed, cycleTime: fillCycleDefaults(fixed.cycleTime as Record<string, unknown> | undefined) } } as T;
+  }
+  if (picker === 'local') {
+    return { ...ttc, cycleTime: fillCycleDefaults(ttc.cycleTime as Record<string, unknown> | undefined) } as T;
+  }
+  return ttc; // global → cycle time inherited from the GTP (read-only)
+}
+
 function mapTimeTabToTimeConfig(ttc: TimeTabUIConfig): TimeConfig {
   // New design uses `linkTimeWith` ('local' | 'fixed' | 'global'); fall back to
   // the deprecated `timeType` for back-compat.
@@ -247,6 +284,20 @@ function mapTimeTabToTimeConfig(ttc: TimeTabUIConfig): TimeConfig {
     enabled: true,
   }));
 
+  // Comparison settings live in different places per picker: local at the top
+  // level, fixed under `ttc.fixed`, global under `ttc.global`. Capture from the
+  // matching scope. (Global ON/OFF is presented as inherited from the linked
+  // GTP by the SDK time-tab; we read whatever the tab persists for the scope.)
+  type CmpScope = {
+    comparisonMode?: boolean;
+    deviationPattern?: 'green-up-positive' | 'red-up-positive';
+    allowPerSourceIndicator?: boolean;
+    sourceDeviationOverrides?: Record<string, 'green-up-positive' | 'red-up-positive'>;
+  };
+  const cmpAny = ttc as unknown as CmpScope & { fixed?: CmpScope; global?: CmpScope };
+  const cmpScope: CmpScope | undefined =
+    picker === 'fixed' ? cmpAny.fixed : picker === 'global' ? cmpAny.global : cmpAny;
+
   return {
     timezone: ttc.timezone,
     // Engine still treats global like local (rolling) for data resolution,
@@ -264,7 +315,10 @@ function mapTimeTabToTimeConfig(ttc: TimeTabUIConfig): TimeConfig {
       ? fd.periodicity.toLowerCase()
       : ttc.defaultPeriodicity) as TimeConfig['defaultPeriodicity'],
     shifts: shifts.length > 0 ? shifts : undefined,
-    comparisonMode: ttc.comparisonMode,
+    comparisonMode: Boolean(cmpScope?.comparisonMode),
+    deviationPattern: cmpScope?.deviationPattern,
+    allowPerSourceIndicator: Boolean(cmpScope?.allowPerSourceIndicator),
+    sourceDeviationOverrides: cmpScope?.sourceDeviationOverrides,
   };
 }
 
@@ -329,34 +383,108 @@ function pickRandomColor(): string {
   return DEFAULT_COLOR_PALETTE[Math.floor(Math.random() * DEFAULT_COLOR_PALETTE.length)];
 }
 
-// Ensures a default Left axis exists on the chart, and appends `newSourceId`
-// to it. Called whenever a series / fixed-series is added so the user never
-// has to create an axis manually before they see something on the chart.
-// If a left axis (yAxis === 0) already exists, the new source joins it; if
-// not, a brand-new "Left axis" entry is created. Idempotent w.r.t. ids
-// already present in the axis's seriesIds.
-function ensureLeftAxisWithSource(axes: AxisConfig[], newSourceId: string): AxisConfig[] {
-  const leftIdx = axes.findIndex((a) => a.yAxis === 0);
-  if (leftIdx >= 0) {
-    const left = axes[leftIdx];
-    if (left.seriesIds.includes(newSourceId)) return axes;
-    return axes.map((a, i) => i === leftIdx ? { ...a, seriesIds: [...a.seriesIds, newSourceId] } : a);
-  }
-  const defaultLeft: AxisConfig = {
-    _id: `axis_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
-    name: 'Left axis',
-    yAxis: 0,
-    seriesIds: [newSourceId],
-  };
-  return [...axes, defaultLeft];
+// ── Axis model helpers ──────────────────────────────────────────────────────
+// A chart always owns a default Left axis (yAxis: 0) and may own one optional
+// Right axis (yAxis: 1). Every data source belongs to exactly one axis, and
+// `series.yAxis` / `fixedSeries.yAxis` always mirror that membership. The
+// Right axis exists iff it owns ≥1 series — an empty Right axis is dropped.
+
+// Seed the default Left axis. `name: ''` = no title (left falls back to the
+// widget-level yAxisUnit at render time).
+function makeLeftAxis(seriesIds: string[] = []): AxisConfig {
+  return { _id: LEFT_AXIS_ID, name: '', yAxis: 0, seriesIds };
 }
 
-// Removes `sourceId` from every axis's seriesIds — used when a data source
-// is deleted so axes don't retain stale ids.
-function removeSourceFromAxes(axes: AxisConfig[], sourceId: string): AxisConfig[] {
-  return axes.map((a) => a.seriesIds.includes(sourceId)
-    ? { ...a, seriesIds: a.seriesIds.filter((id) => id !== sourceId) }
-    : a);
+// All data-source ids on a chart (regular series + fixed series).
+function allSeriesIds(chart: ChartConfig): string[] {
+  return [...chart.series.map((s) => s._id), ...chart.fixedSeries.map((s) => s._id)];
+}
+
+// The data-source ids currently sitting on the Right axis ([] if none).
+function rightIdsOf(chart: ChartConfig): string[] {
+  return (chart.axes ?? []).find((a) => a.yAxis === 1)?.seriesIds ?? [];
+}
+
+// THE single source of truth for axis membership. Rebuilds `axes` plus every
+// `series.yAxis` / `fixedSeries.yAxis` from a desired set of Right-axis ids —
+// Left gets everything else. Drops the Right axis entirely when it would be
+// empty. Names are preserved unless explicitly overridden.
+function syncAxes(
+  chart: ChartConfig,
+  rightIds: string[],
+  names?: { leftName?: string; rightName?: string },
+): ChartConfig {
+  const all = allSeriesIds(chart);
+  const rightSet = new Set(rightIds.filter((id) => all.includes(id)));
+  const leftIds = all.filter((id) => !rightSet.has(id));
+
+  const prevLeft = (chart.axes ?? []).find((a) => a.yAxis === 0);
+  const prevRight = (chart.axes ?? []).find((a) => a.yAxis === 1);
+
+  const axes: AxisConfig[] = [
+    {
+      _id: LEFT_AXIS_ID,
+      name: names?.leftName !== undefined ? names.leftName : (prevLeft?.name ?? ''),
+      yAxis: 0,
+      seriesIds: leftIds,
+    },
+  ];
+  if (rightSet.size > 0) {
+    axes.push({
+      _id: RIGHT_AXIS_ID,
+      name: names?.rightName !== undefined ? names.rightName : (prevRight?.name ?? ''),
+      yAxis: 1,
+      seriesIds: [...rightSet],
+    });
+  }
+
+  const onRight = (id: string) => rightSet.has(id);
+  return {
+    ...chart,
+    axes,
+    series: chart.series.map((s) => ({ ...s, yAxis: onRight(s._id) ? 1 : 0 })),
+    fixedSeries: chart.fixedSeries.map((s) => ({ ...s, yAxis: onRight(s._id) ? 1 : 0 })),
+  };
+}
+
+// Enforces axis invariants on load. Back-fills a Left axis for legacy
+// `axes: []` configs, and reconstructs the Right axis from any existing Right
+// axis object or from series flagged `yAxis === 1`. Dangling ids are dropped
+// by syncAxes (it filters to ids that still exist on the chart).
+function normalizeChart(chart: ChartConfig): ChartConfig {
+  const existingRight = (chart.axes ?? []).find((a) => a.yAxis === 1);
+  const rightIds = existingRight
+    ? existingRight.seriesIds
+    : [
+        ...chart.series.filter((s) => s.yAxis === 1).map((s) => s._id),
+        ...chart.fixedSeries.filter((s) => s.yAxis === 1).map((s) => s._id),
+      ];
+  return syncAxes(chart, rightIds, {
+    leftName: (chart.axes ?? []).find((a) => a.yAxis === 0)?.name,
+    rightName: existingRight?.name,
+  });
+}
+
+// Removes a deleted data source and re-syncs axis membership so no id dangles.
+// If it was the last series on the Right axis, syncAxes auto-drops the Right axis.
+function removeSeriesEverywhere(chart: ChartConfig, id: string): ChartConfig {
+  const stripped: ChartConfig = {
+    ...chart,
+    series: chart.series.filter((s) => s._id !== id),
+    fixedSeries: chart.fixedSeries.filter((s) => s._id !== id),
+  };
+  return syncAxes(stripped, rightIdsOf(chart).filter((x) => x !== id));
+}
+
+// Removes the Right axis: its series fall back to the Left axis, and any plot
+// line / band pinned to the Right axis re-homes to the Left.
+function deleteRightAxis(chart: ChartConfig): ChartConfig {
+  const synced = syncAxes(chart, []);
+  return {
+    ...synced,
+    plotLines: synced.plotLines.map((p) => (p.yAxis === 1 ? { ...p, yAxis: 0 } : p)),
+    plotBands: synced.plotBands.map((p) => (p.yAxis === 1 ? { ...p, yAxis: 0 } : p)),
+  };
 }
 
 function makeDefaultChart(): ChartConfig {
@@ -373,7 +501,7 @@ function makeEmptyChart(): ChartConfig {
     title: '',
     series: [],
     fixedSeries: [],
-    axes: [],
+    axes: [makeLeftAxis()],
     stacks: [],
     plotLines: [],
     plotBands: [],
@@ -404,7 +532,7 @@ export function ColumnChartConfiguration(props: ColumnChartConfigurationProps) {
   // charts = committed source of truth. Empty on first mount → "Empty" mode.
   // activeChartId points the form at one committed chart in View mode.
   // pendingChart / draft are scratch buffers — never emit until commitState().
-  const initCharts = config?.uiConfig?.charts ?? [];
+  const initCharts = (config?.uiConfig?.charts ?? []).map(normalizeChart);
   const [chartsList,       setChartsList]       = useState<ChartConfig[]>(initCharts);
   const [selectedChartId,  setSelectedChartId]  = useState<string>(initCharts[0]?._id ?? '');
   const [chartPickerOpen,  setChartPickerOpen]  = useState(false);
@@ -481,6 +609,8 @@ export function ColumnChartConfiguration(props: ColumnChartConfigurationProps) {
   const [formWidth,    setFormWidth]    = useState('');
   const [formDashStyle,               setFormDashStyle]               = useState('');
   const [formDashStylePickerOpen,     setFormDashStylePickerOpen]     = useState(false);
+  // Which axis a plot line / band is drawn against (0 = left, 1 = right).
+  const [formPlotYAxis,               setFormPlotYAxis]               = useState<0 | 1>(0);
   const [formAxisName,                setFormAxisName]                = useState('');
   const [formAxisYAxis,               setFormAxisYAxis]               = useState<0 | 1>(0);
   const [formAxisSeriesIds,           setFormAxisSeriesIds]           = useState<string[]>([]);
@@ -497,7 +627,7 @@ export function ColumnChartConfiguration(props: ColumnChartConfigurationProps) {
 
   useEffect(() => {
     if (config) {
-      const raw = config.uiConfig?.charts ?? [];
+      const raw = (config.uiConfig?.charts ?? []).map(normalizeChart);
       // Migrate legacy widget-level title/description onto the first chart if
       // the first chart doesn't carry its own.
       let charts = raw;
@@ -893,8 +1023,9 @@ export function ColumnChartConfiguration(props: ColumnChartConfigurationProps) {
 
   // Confirm + execute deletion of the currently-pending row target. Routes
   // by `kind` so each section's array on the active chart is rebuilt without
-  // the deleted entry. Series / fixed-series deletes also strip the deleted
-  // id from any axis that references it via `removeSourceFromAxes`.
+  // the deleted entry. Series / fixed-series deletes re-sync axis membership
+  // via `removeSeriesEverywhere`; the axis delete routes through
+  // `deleteRightAxis` (only the Right axis is deletable).
   function confirmDeleteTarget() {
     if (!deleteTarget) return;
     const chart = chartsList.find((c) => c._id === deleteTarget.chartId);
@@ -903,20 +1034,27 @@ export function ColumnChartConfiguration(props: ColumnChartConfigurationProps) {
     let update: Partial<ChartConfig> = {};
     switch (deleteTarget.kind) {
       case 'series':
+      case 'fixed': {
+        // Re-sync axis membership so no id dangles; auto-drops the Right axis
+        // if this was its last series.
+        const synced = removeSeriesEverywhere(chart, id);
+        update = { series: synced.series, fixedSeries: synced.fixedSeries, axes: synced.axes };
+        break;
+      }
+      case 'axis': {
+        // Only the Right axis has a delete affordance; the Left axis is never
+        // deletable. Its series fall back to Left; right-pinned plot
+        // lines/bands re-home to Left.
+        const synced = deleteRightAxis(chart);
         update = {
-          series: chart.series.filter((x) => x._id !== id),
-          axes:   removeSourceFromAxes(chart.axes ?? [], id),
+          axes: synced.axes,
+          series: synced.series,
+          fixedSeries: synced.fixedSeries,
+          plotLines: synced.plotLines,
+          plotBands: synced.plotBands,
         };
         break;
-      case 'fixed':
-        update = {
-          fixedSeries: chart.fixedSeries.filter((x) => x._id !== id),
-          axes:        removeSourceFromAxes(chart.axes ?? [], id),
-        };
-        break;
-      case 'axis':
-        update = { axes: (chart.axes ?? []).filter((x) => x._id !== id) };
-        break;
+      }
       case 'stack':
         update = { stacks: chart.stacks.filter((x) => x._id !== id) };
         break;
@@ -985,7 +1123,7 @@ export function ColumnChartConfiguration(props: ColumnChartConfigurationProps) {
     setFormAxisName(''); setFormAxisYAxis(0); setFormAxisSeriesIds([]); setFormAxisSeriesDropdownOpen(false);
     setFormStackName(''); setFormStackSeriesIds([]); setFormStackSeriesDropdownOpen(false);
     setFormValue(''); setFormFrom(''); setFormTo(''); setFormWidth('');
-    setFormDashStyle(''); setFormDashStylePickerOpen(false);
+    setFormDashStyle(''); setFormDashStylePickerOpen(false); setFormPlotYAxis(0);
     setFormPeriodicityType('independent'); setFormPeriodicities([]); setFormCurrentPeriodicity(''); setFormPeriodicityDropdownOpen(false);
     setModalOpen(true);
   }
@@ -1026,6 +1164,7 @@ export function ColumnChartConfiguration(props: ColumnChartConfigurationProps) {
     setFormPeriodicities(item.periodicities ?? []);
     setFormCurrentPeriodicity('');
     setFormPeriodicityDropdownOpen(false);
+    setFormPlotYAxis(item.yAxis ?? 0);
     setModalOpen(true);
   }
 
@@ -1037,6 +1176,7 @@ export function ColumnChartConfiguration(props: ColumnChartConfigurationProps) {
     setEditingId(item._id);
     setFormFrom(String(item.from));
     setFormTo(String(item.to));
+    setFormPlotYAxis(item.yAxis ?? 0);
     setFormLabel(item.label);
     setFormColor(item.color);
     setModalOpen(true);
@@ -1044,6 +1184,8 @@ export function ColumnChartConfiguration(props: ColumnChartConfigurationProps) {
 
   function openAddAxisModal(chartId: string, e: React.MouseEvent) {
     openAddModal(chartId, 'axis', e);
+    // Adding an axis always means the Right axis (Left is the default).
+    setFormAxisYAxis(1);
   }
 
   function openEditAxisModal(chartId: string, e: React.MouseEvent, item: AxisConfig) {
@@ -1079,7 +1221,7 @@ export function ColumnChartConfiguration(props: ColumnChartConfigurationProps) {
     setFormAxisName(''); setFormAxisYAxis(0); setFormAxisSeriesIds([]); setFormAxisSeriesDropdownOpen(false);
     setFormStackName(''); setFormStackSeriesIds([]); setFormStackSeriesDropdownOpen(false);
     setFormValue(''); setFormFrom(''); setFormTo(''); setFormWidth('');
-    setFormDashStyle(''); setFormDashStylePickerOpen(false);
+    setFormDashStyle(''); setFormDashStylePickerOpen(false); setFormPlotYAxis(0);
     setFormPeriodicityType('independent'); setFormPeriodicities([]); setFormCurrentPeriodicity(''); setFormPeriodicityDropdownOpen(false);
   }
 
@@ -1099,13 +1241,13 @@ export function ColumnChartConfiguration(props: ColumnChartConfigurationProps) {
         unit: formUnit || undefined,
         precision: formPrecision !== '' ? Number(formPrecision) : undefined,
       };
-      const isAdding = !editingId;
-      update = {
-        series: editingId
-          ? chart.series.map((s) => s._id === editingId ? entry : s)
-          : [...chart.series, entry],
-        ...(isAdding ? { axes: ensureLeftAxisWithSource(chart.axes ?? [], entry._id) } : {}),
-      };
+      const nextSeries = editingId
+        ? chart.series.map((s) => s._id === editingId ? entry : s)
+        : [...chart.series, entry];
+      // New sources auto-join the Left axis (left out of the Right id set);
+      // edits preserve membership. syncAxes rebuilds axes + series.yAxis.
+      const synced = syncAxes({ ...chart, series: nextSeries }, rightIdsOf(chart));
+      update = { series: synced.series, fixedSeries: synced.fixedSeries, axes: synced.axes };
     } else if (modalSection === 'plotLine') {
       const rawValue = formValue.trim();
       const entry: PlotLineConfig = {
@@ -1117,6 +1259,9 @@ export function ColumnChartConfiguration(props: ColumnChartConfigurationProps) {
         ...(formDashStyle ? { dashStyle: formDashStyle as PlotLineConfig['dashStyle'] } : {}),
         periodicityType: formPeriodicityType,
         ...(formPeriodicityType === 'dependent' && formPeriodicities.length > 0 ? { periodicities: formPeriodicities } : {}),
+        // Axis choice is only meaningful — and only persisted — when a Right
+        // axis exists; otherwise the line defaults to the Left axis.
+        ...((chart.axes ?? []).some((a) => a.yAxis === 1) ? { yAxis: formPlotYAxis } : {}),
       };
       update = {
         plotLines: editingId
@@ -1132,6 +1277,7 @@ export function ColumnChartConfiguration(props: ColumnChartConfigurationProps) {
         to:   VARIABLE_REGEX.test(rawTo)   ? rawTo   : (parseFloat(rawTo)   || 0),
         label: formLabel,
         color: formColor,
+        ...((chart.axes ?? []).some((a) => a.yAxis === 1) ? { yAxis: formPlotYAxis } : {}),
       };
       update = {
         plotBands: editingId
@@ -1150,24 +1296,13 @@ export function ColumnChartConfiguration(props: ColumnChartConfigurationProps) {
           : [...chart.stacks, entry],
       };
     } else if (modalSection === 'axis') {
-      const entry: AxisConfig = {
-        _id: editingId ?? `axis_${Date.now()}`,
-        name: formAxisName,
-        yAxis: formAxisYAxis,
-        seriesIds: formAxisSeriesIds,
-      };
-      const assignedSeries = new Set(formAxisSeriesIds);
-      update = {
-        axes: editingId
-          ? (chart.axes ?? []).map((axis) => axis._id === editingId ? entry : axis)
-          : [...(chart.axes ?? []), entry],
-        series: chart.series.map((series) => assignedSeries.has(series._id)
-          ? { ...series, yAxis: formAxisYAxis }
-          : series),
-        fixedSeries: chart.fixedSeries.map((series) => assignedSeries.has(series._id)
-          ? { ...series, yAxis: formAxisYAxis }
-          : series),
-      };
+      // Left edit = rename only (membership unchanged). Right add/edit = the
+      // selected sources move to the Right; everything else stays Left; an
+      // empty Right axis is dropped. syncAxes is the single source of truth.
+      const synced = formAxisYAxis === 0
+        ? syncAxes(chart, rightIdsOf(chart), { leftName: formAxisName })
+        : syncAxes(chart, formAxisSeriesIds, { rightName: formAxisName });
+      update = { axes: synced.axes, series: synced.series, fixedSeries: synced.fixedSeries };
     } else {
       const entry: ColumnChartSeriesConfig = {
         _id: editingId ?? `fixed_${Date.now()}`,
@@ -1175,13 +1310,12 @@ export function ColumnChartConfiguration(props: ColumnChartConfigurationProps) {
         label: formLabel,
         color: formColor || undefined,
       };
-      const isAdding = !editingId;
-      update = {
-        fixedSeries: editingId
-          ? chart.fixedSeries.map((s) => s._id === editingId ? entry : s)
-          : [...chart.fixedSeries, entry],
-        ...(isAdding ? { axes: ensureLeftAxisWithSource(chart.axes ?? [], entry._id) } : {}),
-      };
+      const nextFixed = editingId
+        ? chart.fixedSeries.map((s) => s._id === editingId ? entry : s)
+        : [...chart.fixedSeries, entry];
+      // New fixed sources auto-join the Left axis; edits preserve membership.
+      const synced = syncAxes({ ...chart, fixedSeries: nextFixed }, rightIdsOf(chart));
+      update = { series: synced.series, fixedSeries: synced.fixedSeries, axes: synced.axes };
     }
 
     updateChartInList(modalChartId, update);
@@ -1190,7 +1324,10 @@ export function ColumnChartConfiguration(props: ColumnChartConfigurationProps) {
 
   // ── Time ──────────────────────────────────────────────────────────────────
 
-  function handleTimeChange(ttc: TimeTabUIConfig) {
+  function handleTimeChange(ttcRawInput: TimeTabUIConfig) {
+    // Bake the cycle-time defaults into the emitted config so they're persisted,
+    // not merely shown — and stay idempotent (only blanks fill).
+    const ttc    = withCycleDefaults(ttcRawInput as unknown as Record<string, unknown>) as unknown as TimeTabUIConfig;
     const tc     = mapTimeTabToTimeConfig(ttc);
     logTimeConfig(ttc, tc);
     const ttcRaw = ttc as unknown as Record<string, unknown>;
@@ -1208,7 +1345,7 @@ export function ColumnChartConfiguration(props: ColumnChartConfigurationProps) {
   // `sectionsDisabled` below.
 
   const EMPTY_SECTION_CHART: ChartConfig = {
-    _id: '', title: '', series: [], fixedSeries: [], axes: [], stacks: [], plotLines: [], plotBands: [],
+    _id: '', title: '', series: [], fixedSeries: [], axes: [makeLeftAxis()], stacks: [], plotLines: [], plotBands: [],
   };
   const selectedChart =
     chartsList.find((c) => c._id === selectedChartId) ?? chartsList[0] ?? EMPTY_SECTION_CHART;
@@ -1452,48 +1589,50 @@ export function ColumnChartConfiguration(props: ColumnChartConfigurationProps) {
                   onToggle={() => toggleSection('axis')}
                   headerAction={
                     <IconButton
-                      isDisabled={sectionsDisabled}
+                      isDisabled={sectionsDisabled || (selectedChart.axes ?? []).some((a) => a.yAxis === 1)}
                       icon={<Plus size={14} />}
                       size="16"
-                      aria-label="Add axis"
+                      aria-label="Add right axis"
                       onClick={(e) => openAddAxisModal(selectedChart._id, e)}
                     />
                   }
                 >
                   <div className="cc-config__section">
-                    {(selectedChart.axes ?? []).length === 0 ? (
-                      <p className="cc-config__empty-hint BodySmallRegular">No axes. Click + to add.</p>
-                    ) : (
-                      (selectedChart.axes ?? []).map((axis) => {
-                        const axisSeries = [
-                          ...selectedChart.series,
-                          ...selectedChart.fixedSeries,
-                        ].filter((item) => axis.seriesIds.includes(item._id));
-                        const axisLabel = axis.yAxis === 0 ? 'Left Axis' : 'Right Axis';
-                        return (
-                          <ListCard
-                            key={axis._id}
-                            className="cc-config__row-card"
-                            title={axis.name || 'Unnamed Axis'}
-                            subtitle={`${axisLabel}${axisSeries.length > 0 ? ` • ${axisSeries.length} series` : ''}`}
-                            onClick={(e) => openEditAxisModal(selectedChart._id, e, axis)}
-                            trailingItems={
-                              <ListCardTrailingItem
-                                trailing="Icon"
-                                icon={(
-                                  <IconButton
-                                    icon={<Trash2 size={13} />}
-                                    size="16"
-                                    aria-label="Delete"
-                                    onClick={(e) => { e.stopPropagation(); setDeleteTarget({ kind: 'axis', chartId: selectedChart._id, id: axis._id }); }}
-                                  />
-                                )}
-                              />
-                            }
-                          />
-                        );
-                      })
-                    )}
+                    <p className="cc-config__empty-hint BodySmallRegular cc-config__axis-hint">
+                      <Info size={16} />
+                      <span>Left axis is used by default. Add a right axis for different values.</span>
+                    </p>
+                    {(selectedChart.axes ?? []).map((axis) => {
+                      const axisSeries = [
+                        ...selectedChart.series,
+                        ...selectedChart.fixedSeries,
+                      ].filter((item) => axis.seriesIds.includes(item._id));
+                      const isRight = axis.yAxis === 1;
+                      const count = axisSeries.length;
+                      const subtitle = `${isRight ? 'Right' : 'Left'} • ${count} Data Source${count === 1 ? '' : 's'}`;
+                      return (
+                        <ListCard
+                          key={axis._id}
+                          className="cc-config__row-card"
+                          title={axis.name || (isRight ? 'Right Axis' : 'Left Axis')}
+                          subtitle={subtitle}
+                          onClick={(e) => openEditAxisModal(selectedChart._id, e, axis)}
+                          trailingItems={isRight ? (
+                            <ListCardTrailingItem
+                              trailing="Icon"
+                              icon={(
+                                <IconButton
+                                  icon={<Trash2 size={13} />}
+                                  size="16"
+                                  aria-label="Delete"
+                                  onClick={(e) => { e.stopPropagation(); setDeleteTarget({ kind: 'axis', chartId: selectedChart._id, id: axis._id }); }}
+                                />
+                              )}
+                            />
+                          ) : undefined}
+                        />
+                      );
+                    })}
                   </div>
                 </ProductAccordionItem>
 
@@ -1619,10 +1758,10 @@ export function ColumnChartConfiguration(props: ColumnChartConfigurationProps) {
 
         {/* ── Time Tab ── */}
         {activeTab === 'time' && (
-          <div className="cc-config__time-tab">
+          <div className={`cc-config__time-tab${currentTimeConfig?.allowPerSourceIndicator ? ' cc-config__time-tab--per-source' : ''}`}>
             <TimeTabConfiguration
               onChange={handleTimeChange}
-              value={currentTimeTabConfig as Partial<TimeTabUIConfig> | undefined}
+              value={withCycleDefaults(currentTimeTabConfig) as Partial<TimeTabUIConfig> | undefined}
               globalTimepickers={props.globalTimepickers}
               charts={chartsList.map((c, i) => ({
                 id: c._id,
@@ -1923,7 +2062,7 @@ export function ColumnChartConfiguration(props: ColumnChartConfigurationProps) {
             title={
               modalSection === 'plotLine'  ? (editingId ? 'Edit Plot Line'    : 'Add Plot Line')
             : modalSection === 'plotBand'  ? (editingId ? 'Edit Plot Band'    : 'Add Plot Band')
-            : modalSection === 'axis'      ? (editingId ? 'Edit Axis'         : 'Add Axis')
+            : modalSection === 'axis'      ? (formAxisYAxis === 0 ? 'Edit Left Axis' : (editingId ? 'Edit Right Axis' : 'Add Right Axis'))
             : modalSection === 'fixed'     ? (editingId ? 'Edit Fixed Series' : 'Add Fixed Series')
             : modalSection === 'stack'     ? (editingId ? 'Edit Stack'        : 'Add Stack')
             :                               (editingId ? 'Edit Data Source'   : 'Add Data Source')
@@ -1941,7 +2080,7 @@ export function ColumnChartConfiguration(props: ColumnChartConfigurationProps) {
                 : modalSection === 'fixed'    ? 'Add Fixed Series'
                 : modalSection === 'plotBand' ? 'Add Plot Band'
                 : modalSection === 'plotLine' ? 'Add Plot Line'
-                : modalSection === 'axis'     ? 'Add Axis'
+                : modalSection === 'axis'     ? 'Add Right Axis'
                 : modalSection === 'stack'    ? 'Add Stack'
                 : 'Add'
               }
@@ -1952,7 +2091,9 @@ export function ColumnChartConfiguration(props: ColumnChartConfigurationProps) {
                   : modalSection === 'plotBand'
                   ? !formLabel.trim() || !formColor.trim() || !formFrom.trim() || !formTo.trim()
                   : modalSection === 'axis'
-                  ? !formAxisName.trim() || formAxisSeriesIds.length === 0
+                  ? (formAxisYAxis === 1
+                      ? !formAxisName.trim() || formAxisSeriesIds.length === 0
+                      : !formAxisName.trim())
                   : modalSection === 'stack'
                   ? !formStackName.trim() || formStackSeriesIds.length === 0
                   : false
@@ -2024,6 +2165,20 @@ export function ColumnChartConfiguration(props: ColumnChartConfigurationProps) {
                     )}
                   </SelectInput>
                 </div>
+                {/* 4b. Axis — only when a Right axis exists */}
+                {(chartsList.find((c) => c._id === modalChartId)?.axes ?? []).some((a) => a.yAxis === 1) && (
+                  <RadioGroup
+                    name="plotline-axis"
+                    label="Axis"
+                    size="Medium"
+                    value={String(formPlotYAxis)}
+                    orientation="Horizontal"
+                    onChange={({ value }: RadioGroupChangeMeta) => setFormPlotYAxis(Number(value) as 0 | 1)}
+                  >
+                    <Radio label="Left" value="0" />
+                    <Radio label="Right" value="1" />
+                  </RadioGroup>
+                )}
                 {/* 5. Periodicity behavior */}
                 <RadioGroup
                   name="periodicity-type"
@@ -2106,6 +2261,20 @@ export function ColumnChartConfiguration(props: ColumnChartConfigurationProps) {
                   <UNSPathInput label="Start value" necessityIndicator="required" isRequired placeholder="Start value" value={formFrom} tree={unsTree} isLoading={isLoadingTree} onChange={(v: string) => setFormFrom(resolveUNSValue(v))} onOpen={() => loadWorkspaces()} />
                   <UNSPathInput label="End value"   necessityIndicator="required" isRequired placeholder="End value"   value={formTo}   tree={unsTree} isLoading={isLoadingTree} onChange={(v: string) => setFormTo(resolveUNSValue(v))}   onOpen={() => loadWorkspaces()} />
                 </div>
+                {/* Axis — only when a Right axis exists */}
+                {(chartsList.find((c) => c._id === modalChartId)?.axes ?? []).some((a) => a.yAxis === 1) && (
+                  <RadioGroup
+                    name="plotband-axis"
+                    label="Axis"
+                    size="Medium"
+                    value={String(formPlotYAxis)}
+                    orientation="Horizontal"
+                    onChange={({ value }: RadioGroupChangeMeta) => setFormPlotYAxis(Number(value) as 0 | 1)}
+                  >
+                    <Radio label="Left" value="0" />
+                    <Radio label="Right" value="1" />
+                  </RadioGroup>
+                )}
               </>
             )}
             {modalSection === 'axis' && (() => {
@@ -2114,64 +2283,57 @@ export function ColumnChartConfiguration(props: ColumnChartConfigurationProps) {
                 ...modalChart.series.map((s, i) => ({ _id: s._id, label: s.label || `Series ${i + 1}` })),
                 ...modalChart.fixedSeries.map((s, i) => ({ _id: s._id, label: s.label || `Fixed ${i + 1}` })),
               ] : [];
+              const isRight = formAxisYAxis === 1;
               return (
                 <>
                   <TextInput
-                    label="Name"
+                    label="Label"
                     necessityIndicator="required"
                     isRequired
                     placeholder="e.g. Temperature"
                     value={formAxisName}
                     onChange={({ value }) => setFormAxisName(value)}
                   />
-                  <RadioGroup
-                    name="axis-side"
-                    label="Axis side"
-                    value={String(formAxisYAxis)}
-                    orientation="Horizontal"
-                    onChange={({ value }: RadioGroupChangeMeta) => {
-                      setFormAxisYAxis(Number(value) as 0 | 1);
-                    }}
-                  >
-                    <Radio label="Left Axis" value="0" />
-                    <Radio label="Right Axis" value="1" />
-                  </RadioGroup>
-                  <SelectInput
-                    label="Series"
-                    necessityIndicator="required"
-                    placeholder="Select series for this axis…"
-                    tags={formAxisSeriesIds.map((id) => {
-                      const item = axisItems.find((it) => it._id === id);
-                      return {
-                        label: item?.label ?? id,
-                        onDismiss: () => setFormAxisSeriesIds(formAxisSeriesIds.filter((x) => x !== id)),
-                      };
-                    })}
-                    isOpen={formAxisSeriesDropdownOpen}
-                    onClick={() => setFormAxisSeriesDropdownOpen((v) => !v)}
-                  >
-                    {formAxisSeriesDropdownOpen && (
-                      <DropdownMenu>
-                        <ActionListItemGroup>
-                          {axisItems.map((item) => (
-                            <ActionListItem
-                              key={item._id}
-                              title={item.label}
-                              selectionType="Multiple"
-                              isSelected={formAxisSeriesIds.includes(item._id)}
-                              onClick={() => {
-                                const has = formAxisSeriesIds.includes(item._id);
-                                setFormAxisSeriesIds(has
-                                  ? formAxisSeriesIds.filter((x) => x !== item._id)
-                                  : [...formAxisSeriesIds, item._id]
-                                );
-                              }}
-                            />
-                          ))}
-                        </ActionListItemGroup>
-                      </DropdownMenu>
-                    )}
-                  </SelectInput>
+                  {/* Data-source selection applies only to the Right axis —
+                      the Left axis owns every source not assigned to the Right. */}
+                  {isRight && (
+                    <SelectInput
+                      label="Data Sources"
+                      necessityIndicator="required"
+                      placeholder="Select data sources for this axis…"
+                      tags={formAxisSeriesIds.map((id) => {
+                        const item = axisItems.find((it) => it._id === id);
+                        return {
+                          label: item?.label ?? id,
+                          onDismiss: () => setFormAxisSeriesIds(formAxisSeriesIds.filter((x) => x !== id)),
+                        };
+                      })}
+                      isOpen={formAxisSeriesDropdownOpen}
+                      onClick={() => setFormAxisSeriesDropdownOpen((v) => !v)}
+                    >
+                      {formAxisSeriesDropdownOpen && (
+                        <DropdownMenu>
+                          <ActionListItemGroup>
+                            {axisItems.map((item) => (
+                              <ActionListItem
+                                key={item._id}
+                                title={item.label}
+                                selectionType="Multiple"
+                                isSelected={formAxisSeriesIds.includes(item._id)}
+                                onClick={() => {
+                                  const has = formAxisSeriesIds.includes(item._id);
+                                  setFormAxisSeriesIds(has
+                                    ? formAxisSeriesIds.filter((x) => x !== item._id)
+                                    : [...formAxisSeriesIds, item._id]
+                                  );
+                                }}
+                              />
+                            ))}
+                          </ActionListItemGroup>
+                        </DropdownMenu>
+                      )}
+                    </SelectInput>
+                  )}
                 </>
               );
             })()}

@@ -12,13 +12,25 @@ const PERIODICITY_TIME_FRAME: Record<string, string> = {
 
 interface MiniEngineCtx {
   authentication: string;
-  override?: { startTime: number; endTime: number; periodicity?: string };
+  override?: {
+    startTime: number; endTime: number; periodicity?: string;
+    // Explicit comparison window picked in the date picker's Compare panel.
+    comparisonStartTime?: number; comparisonEndTime?: number;
+  };
+}
+
+// True when a resolved DataEntry[] carries at least one non-null value — used to
+// decide whether the comparison fetch produced anything to compute deviation on.
+function hasValues(items: DataEntry[]): boolean {
+  return items.some((e) =>
+    Array.isArray(e.slots) && e.slots.some((s) => (s as { value?: number | null }).value != null),
+  );
 }
 
 export async function resolve(
   envelope: ColumnChartEnvelope,
   ctx: MiniEngineCtx,
-): Promise<{ config: ColumnChartUIConfig; data: DataEntry[] }> {
+): Promise<{ config: ColumnChartUIConfig; data: DataEntry[]; comparisonData?: DataEntry[] }> {
   const { startTime, endTime } = computeWindow(envelope, ctx.override);
   const bindings = envelope.dynamicBindingPathList ?? [];
 
@@ -57,20 +69,50 @@ export async function resolve(
       ? PERIODICITY_TIME_FRAME[periodicity.toLowerCase()]
       : undefined;
 
+    const mappedBindings = validBindings.map((binding) =>
+      'type' in binding && binding.type === 'series'
+        ? { key: binding.key, topic: binding.topic, type: 'series' as const }
+        : { key: binding.key, topic: binding.topic }
+    );
+
     const items = await resolveAndCompute(
       ctx.authentication,
-      validBindings.map((binding) =>
-        'type' in binding && binding.type === 'series'
-          ? { key: binding.key, topic: binding.topic, type: 'series' as const }
-          : { key: binding.key, topic: binding.topic }
-      ),
+      mappedBindings,
       startTime,
       endTime,
       timeFrame,
     );
+
+    // ── Comparison window ────────────────────────────────────────────────────
+    // When Comparison Mode is on, fetch a second window so the chart can show
+    // the ▲/▼ deviation. The window is the explicit one picked in the Compare
+    // panel, else the immediately-preceding period of equal length.
+    let comparisonData: DataEntry[] | undefined;
+    if (envelope.timeConfig?.comparisonMode) {
+      const span     = endTime - startTime;
+      const compStart = ctx.override?.comparisonStartTime ?? (startTime - span);
+      const compEnd   = ctx.override?.comparisonEndTime   ?? startTime;
+      comparisonData = await resolveAndCompute(
+        ctx.authentication, mappedBindings, compStart, compEnd, timeFrame,
+      );
+      // Dev fallback (edge case): when the prior window has no data (empty or
+      // all-null), synthesize from the current values so the deviation always
+      // has something to compute against in the harness.
+      if (!hasValues(comparisonData)) {
+        comparisonData = items.map((e) =>
+          Array.isArray(e.slots)
+            ? { ...e, slots: e.slots.map((s) => {
+                const v = (s as { value?: number | null }).value;
+                return { ...s, value: v == null ? null : Math.round(v * 0.9 * 100) / 100 };
+              }) }
+            : e,
+        );
+      }
+    }
+
     // Pass resolveAndCompute items through AS-IS (raw shape) — same as the
     // production Lens Data Engine. No reshaping/wrapping here.
-    return { config: envelope.uiConfig, data: items };
+    return { config: envelope.uiConfig, data: items, comparisonData };
   } catch {
     return { config: envelope.uiConfig, data: [] };
   }

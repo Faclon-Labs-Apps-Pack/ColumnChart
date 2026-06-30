@@ -127,10 +127,21 @@ export interface TimeConfig {
   /** Comparison Mode flag from the time tab — enables the DatePicker's
    *  Compare toggle (auto-discovered via ChartTimeProvider). */
   comparisonMode?: boolean;
+  /** How the ▲/▼ deviation indicator is colored. green-up = increase is good;
+   *  red-up = increase is bad. Chart-wide default. */
+  deviationPattern?: 'green-up-positive' | 'red-up-positive';
+  /** When on, deviation polarity can be overridden per data source. */
+  allowPerSourceIndicator?: boolean;
+  /** Per-source polarity overrides, keyed `${chartId}:${seriesId}`. */
+  sourceDeviationOverrides?: Record<string, 'green-up-positive' | 'red-up-positive'>;
 }
 
 export type WidgetEvent =
-  | { type: 'TIME_CHANGE'; payload: { startTime: string; endTime: string; periodicity: string } }
+  | { type: 'TIME_CHANGE'; payload: {
+      startTime: string; endTime: string; periodicity: string;
+      // Resolved comparison window (when Compare is on in the date picker).
+      comparisonStartTime?: string; comparisonEndTime?: string;
+    } }
   | { type: 'FILTER_CHANGE'; payload: Record<string, unknown> };
 
 // ---------------------------------------------------------------------------
@@ -162,11 +173,17 @@ export interface StackConfig {
 }
 
 export interface AxisConfig {
-  _id: string;
-  name: string;
-  yAxis: 0 | 1;
+  _id: string;           // LEFT_AXIS_ID ('axis_left') or RIGHT_AXIS_ID ('axis_right')
+  name: string;          // axis title; '' = no title (left falls back to yAxisUnit)
+  yAxis: 0 | 1;          // 0 = left, 1 = right
   seriesIds: string[];   // _id refs into series[] and fixedSeries[]
 }
+
+// Stable axis ids. A chart always owns a Left axis (yAxis: 0) and may own one
+// optional Right axis (yAxis: 1). These constants keep axis identity stable
+// across edits so membership/ownership never depends on generated ids.
+export const LEFT_AXIS_ID = 'axis_left';
+export const RIGHT_AXIS_ID = 'axis_right';
 
 export type PlotLinePeriodicity = 'hourly' | 'daily' | 'weekly' | 'monthly';
 
@@ -179,6 +196,7 @@ export interface PlotLineConfig {
   dashStyle?: 'Solid' | 'Dash' | 'Dot' | 'DashDot' | 'LongDash' | 'ShortDash';
   periodicityType?: 'independent' | 'dependent';
   periodicities?: PlotLinePeriodicity[];
+  yAxis?: 0 | 1;           // which axis the line is drawn against (default 0 = left)
 }
 
 export interface PlotBandConfig {
@@ -187,6 +205,7 @@ export interface PlotBandConfig {
   to: number | string;
   label: string;
   color: string;
+  yAxis?: 0 | 1;           // which axis the band is drawn against (default 0 = left)
 }
 
 export type WidgetSizePreset = 'Small' | 'Medium' | 'Large' | 'Custom';
