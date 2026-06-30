@@ -3,7 +3,6 @@ import { createPortal } from 'react-dom';
 import { ColumnChart as ColumnChartDisplay } from '@faclon-labs/design-sdk/ColumnChart';
 import { LineChart } from '@faclon-labs/design-sdk/LineChart';
 import { AreaChart } from '@faclon-labs/design-sdk/AreaChart';
-import { ComboLineChart } from '@faclon-labs/design-sdk/ComboLineChart';
 import { ChartSwitcher } from '@faclon-labs/design-sdk/ChartSwitcher';
 import { exportChart } from '@faclon-labs/design-sdk/Chart';
 import type { ChartExportFormat } from '@faclon-labs/design-sdk/Chart';
@@ -600,7 +599,7 @@ function buildChartDisplayData(
   return { resolvedSeries, resolvedSeriesIds, categories, plotLines, plotBands, yAxisUnit, firstPayload, highchartsOptions };
 }
 
-// Build the ComboLineChart `comparison` sources for a chart: per regular series,
+// Build the SDK ColumnChart `comparison` sources for a chart: per regular series,
 // the current-period values (from `data`) aligned with the comparison-period
 // values (from `comparisonData`). Per-source polarity comes from
 // `overrides[`${chartId}:${seriesId}`]`, else the chart-wide default. Fixed
@@ -640,6 +639,61 @@ function buildChartComparison(
   });
 
   return { sources, categories, comparisonCategories };
+}
+
+// ── Shift bucketing ────────────────────────────────────────────────────────────
+// Shift comparison mode is "shift-zoned": each fetched time slot belongs to the
+// one shift whose time-of-day window contains it, so the column for that slot is
+// colored by its shift. These helpers map a slot's epoch timestamp → shift index.
+
+// Parse a "HH:mm" time-of-day into minutes since midnight (NaN if malformed).
+function parseTimeOfDayMinutes(hhmm: string): number {
+  const m = /^(\d{1,2}):(\d{2})$/.exec((hhmm ?? '').trim());
+  if (!m) return NaN;
+  return Number(m[1]) * 60 + Number(m[2]);
+}
+
+// A slot's time-of-day in MINUTES, resolved in the widget's configured timezone
+// (so a slot's shift doesn't drift with the dev machine's locale). Falls back to
+// the browser-local time-of-day when no/!invalid timezone is supplied.
+function timeOfDayMinutes(ts: number, timeZone?: string): number {
+  if (timeZone) {
+    try {
+      const parts = new Intl.DateTimeFormat('en-US', {
+        timeZone, hour: '2-digit', minute: '2-digit', hour12: false,
+      }).formatToParts(new Date(ts));
+      const h = Number(parts.find((p) => p.type === 'hour')?.value ?? '0') % 24;
+      const mm = Number(parts.find((p) => p.type === 'minute')?.value ?? '0');
+      return h * 60 + mm;
+    } catch { /* fall through to local */ }
+  }
+  const d = new Date(ts);
+  return d.getHours() * 60 + d.getMinutes();
+}
+
+// Is `tod` (minutes since midnight) inside a shift window that may wrap past
+// midnight, e.g. 22:00 → 06:00? Equal start/end = a full-day shift.
+function timeInShiftWindow(tod: number, startMin: number, endMin: number): boolean {
+  if (Number.isNaN(startMin) || Number.isNaN(endMin)) return false;
+  if (startMin === endMin) return true;
+  if (startMin < endMin) return tod >= startMin && tod < endMin;
+  return tod >= startMin || tod < endMin; // wraps midnight
+}
+
+// Index of the first shift whose time-of-day window contains `ts`, or -1 when a
+// slot falls outside every configured shift (it's then dropped from all shifts).
+function shiftIndexForTimestamp(
+  ts: number,
+  shiftDefs: Array<{ startTime: string; endTime: string }>,
+  timeZone?: string,
+): number {
+  const tod = timeOfDayMinutes(ts, timeZone);
+  for (let i = 0; i < shiftDefs.length; i++) {
+    if (timeInShiftWindow(tod, parseTimeOfDayMinutes(shiftDefs[i].startTime), parseTimeOfDayMinutes(shiftDefs[i].endTime))) {
+      return i;
+    }
+  }
+  return -1;
 }
 
 // ── Time-config → date-picker mapping ──────────────────────────────────────────
@@ -767,8 +821,12 @@ export function ColumnChart({ config = EMPTY_UI_CONFIG, data = [], comparisonDat
   const [chartTimeMode, setChartTimeMode] = useState<ChartTimeMode>('normal');
   // Comparison settings derived from the time config. `compareOn` reflects the
   // provider's active mode (ChartTimeProvider enforces Shift/Compare exclusion).
+  // `shiftOn` is the shift-comparison state — a SHIFT-based comparison (columns
+  // zoned per shift), distinct from `compareOn`'s date/time-window comparison.
+  // The provider guarantees the two are mutually exclusive.
   const comparisonModeOn  = Boolean(timeConfig?.comparisonMode);
   const compareOn         = chartTimeMode === 'comparison';
+  const shiftOn           = chartTimeMode === 'shift' && (timeConfig?.shifts?.length ?? 0) > 0;
   const deviationPattern  = (timeConfig?.deviationPattern ?? 'green-up-positive') as DeviationPattern;
   const perSourceOverrides = timeConfig?.allowPerSourceIndicator ? timeConfig?.sourceDeviationOverrides : undefined;
   const [periodicityOpen, setPeriodicityOpen] = useState(false);
@@ -1122,31 +1180,39 @@ export function ColumnChart({ config = EMPTY_UI_CONFIG, data = [], comparisonDat
       highchartsOptions,
     };
 
-    // ── Shift mode ──────────────────────────────────────────────────────────
-    // When the user has flipped the DatePicker's Shift toggle AND the time
-    // config carries shifts, reshape per-source data via `buildShiftSeries`
-    // and pass it through the SDK ColumnChart's `shift` prop. The SDK then
-    // renders shift-zoned series + a ShiftLegend chip row.
+    // ── Shift comparison mode ─────────────────────────────────────────────────
+    // When the user flips the DatePicker's Shift toggle AND the time config
+    // carries shifts, reshape per-source data via `buildShiftSeries` and pass it
+    // through the SDK ColumnChart's `shift` prop. The SDK renders shift-zoned
+    // columns (each colored by its shift) + a ShiftLegend chip row.
     //
-    // Until the mini-engine returns shift-bucketed values, each source's
-    // bucket values land in shift 0 (other shifts get null) — the contract is
-    // wired so the moment the engine starts splitting per shift the chart
-    // picks it up automatically.
-    if (chartTimeMode === 'shift' && timeConfig?.shifts && timeConfig.shifts.length > 0) {
+    // The mini-engine returns flat time-of-day slots (no shift split server-side),
+    // so we bucket them here: each slot lands in the ONE shift whose time-of-day
+    // window contains it (`shiftIndexForTimestamp`, timezone-aware). A slot maps
+    // to a single shift, giving the zoned look; slots outside every window (-1)
+    // are dropped from all shift series.
+    if (shiftOn && timeConfig?.shifts && timeConfig.shifts.length > 0) {
       const shiftDefs = timeConfig.shifts.map((s) => ({
         id: s.id, name: s.name, color: s.color,
         startTime: s.startTime, endTime: s.endTime,
       }));
       const enabledIds = new Set(timeConfig.shifts.filter((s) => s.enabled !== false).map((s) => s.id));
-      const buckets = firstPayload?.slots?.length ?? categories.length;
-      const sources = resolvedSeries.map((s, idx) => {
+      const slots = firstPayload?.slots ?? [];
+      const buckets = slots.length || categories.length;
+      // Pre-resolve each bucket → shift index once (shared across every source).
+      const shiftIdxByBucket = Array.from({ length: buckets }, (_, j) =>
+        slots[j] ? shiftIndexForTimestamp(slots[j].from, shiftDefs, timeConfig.timezone) : -1,
+      );
+      const sources = resolvedSeries.map((s) => {
         const flatValues = (s.data as (number | null)[]).slice(0, buckets);
+        // For each shift, keep a bucket's value only when that bucket belongs to
+        // this shift; everything else is null so the SDK draws no column there.
         const valuesByShift = shiftDefs.map((_, shiftIdx) =>
-          shiftIdx === 0
-            ? flatValues
-            : (new Array(buckets).fill(null) as (number | null)[])
+          Array.from({ length: buckets }, (_, j) =>
+            shiftIdxByBucket[j] === shiftIdx ? (flatValues[j] ?? null) : null,
+          ),
         );
-        return { id: resolvedSeries[idx]?.name ?? `source-${idx}`, name: s.name, valuesByShift };
+        return { id: s.name, name: s.name, valuesByShift };
       });
       const built = buildShiftSeries({
         range: { start: new Date(firstPayload?.range?.from ?? 0), end: new Date(firstPayload?.range?.to ?? 0) },
@@ -1164,8 +1230,12 @@ export function ColumnChart({ config = EMPTY_UI_CONFIG, data = [], comparisonDat
 
     // ── Comparison mode ────────────────────────────────────────────────────
     // When Compare is the active mode, the master switch is on, and the engine
-    // returned a comparison window, render through ComboLineChart — the only SDK
-    // chart with the current-vs-comparison + ▲/▼ deviation tooltip contract.
+    // returned a comparison window, render through the SDK ColumnChart's native
+    // `comparison` prop (per its "Comparison" example) — it draws the
+    // current-vs-comparison columns (solid = current, hatched = comparison) plus
+    // the ▲/▼ deviation tooltip. ComboLineChart is NOT used here: it's a
+    // column+line combo, so its legend always renders an extra line-encoding
+    // "Current/Compare" key that this columns-only widget never has series for.
     // `buildChartComparison` aligns current (data) and comparison
     // (comparisonData) values by category; per-source polarity overrides apply
     // only when Advance Settings is on. (Plot lines/bands aren't passed here, so
@@ -1179,10 +1249,11 @@ export function ColumnChart({ config = EMPTY_UI_CONFIG, data = [], comparisonDat
         label: tabLabel,
         type: 'column' as const,
         children: (
-          <ComboLineChart
+          <ColumnChartDisplay
             bare
             categories={cmp.categories}
             comparison={{ series, showDeviation: true, comparisonCategories: cmp.comparisonCategories }}
+            stacked={(chart.stacks ?? []).length > 0 || config.style.stacked}
             showLegend={showLegend}
             showDataLabels={showDataLabels}
             yAxisUnit={config.style.yAxisUnit || undefined}

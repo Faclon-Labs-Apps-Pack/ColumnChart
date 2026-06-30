@@ -1,5 +1,5 @@
 import { ColumnChartEnvelope, ColumnChartUIConfig, DataEntry, SeriesPayload } from './types';
-import { resolveAndCompute } from './api';
+import { resolveAndCompute, ResolveOptions } from './api';
 import { resolveDurationWindow } from './time';
 
 // Maps widget periodicity values → timeFrame string expected by resolveAndCompute
@@ -17,14 +17,6 @@ interface MiniEngineCtx {
     // Explicit comparison window picked in the date picker's Compare panel.
     comparisonStartTime?: number; comparisonEndTime?: number;
   };
-}
-
-// True when a resolved DataEntry[] carries at least one non-null value — used to
-// decide whether the comparison fetch produced anything to compute deviation on.
-function hasValues(items: DataEntry[]): boolean {
-  return items.some((e) =>
-    Array.isArray(e.slots) && e.slots.some((s) => (s as { value?: number | null }).value != null),
-  );
 }
 
 export async function resolve(
@@ -75,40 +67,31 @@ export async function resolve(
         : { key: binding.key, topic: binding.topic }
     );
 
-    const items = await resolveAndCompute(
+    // ── Comparison & Shift (single call) ─────────────────────────────────────
+    // Per the engine contract, comparison and shift ride on the SAME
+    // resolveAndCompute request and are mutually exclusive — comparison wins:
+    //   • comparisonMode on → send comparisonStartTime/EndTime (explicit window
+    //     from the Compare panel, else the immediately-preceding equal period).
+    //     The backend returns the comparison series; no second fetch.
+    //   • else if shifts configured → send the shifts array VERBATIM so the
+    //     backend returns shift-bucketed values (no client-side bucketing).
+    const opts: ResolveOptions = { timeFrame };
+    const shifts = envelope.timeConfig?.shifts;
+    if (envelope.timeConfig?.comparisonMode) {
+      const span = endTime - startTime;
+      opts.comparisonStartTime = ctx.override?.comparisonStartTime ?? (startTime - span);
+      opts.comparisonEndTime   = ctx.override?.comparisonEndTime   ?? startTime;
+    } else if (shifts && shifts.length > 0) {
+      opts.shifts = shifts;
+    }
+
+    const { data: items, comparisonData } = await resolveAndCompute(
       ctx.authentication,
       mappedBindings,
       startTime,
       endTime,
-      timeFrame,
+      opts,
     );
-
-    // ── Comparison window ────────────────────────────────────────────────────
-    // When Comparison Mode is on, fetch a second window so the chart can show
-    // the ▲/▼ deviation. The window is the explicit one picked in the Compare
-    // panel, else the immediately-preceding period of equal length.
-    let comparisonData: DataEntry[] | undefined;
-    if (envelope.timeConfig?.comparisonMode) {
-      const span     = endTime - startTime;
-      const compStart = ctx.override?.comparisonStartTime ?? (startTime - span);
-      const compEnd   = ctx.override?.comparisonEndTime   ?? startTime;
-      comparisonData = await resolveAndCompute(
-        ctx.authentication, mappedBindings, compStart, compEnd, timeFrame,
-      );
-      // Dev fallback (edge case): when the prior window has no data (empty or
-      // all-null), synthesize from the current values so the deviation always
-      // has something to compute against in the harness.
-      if (!hasValues(comparisonData)) {
-        comparisonData = items.map((e) =>
-          Array.isArray(e.slots)
-            ? { ...e, slots: e.slots.map((s) => {
-                const v = (s as { value?: number | null }).value;
-                return { ...s, value: v == null ? null : Math.round(v * 0.9 * 100) / 100 };
-              }) }
-            : e,
-        );
-      }
-    }
 
     // Pass resolveAndCompute items through AS-IS (raw shape) — same as the
     // production Lens Data Engine. No reshaping/wrapping here.

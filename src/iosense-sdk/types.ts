@@ -56,6 +56,10 @@ export interface DataEntry {
   value?: string | number | null | SeriesPayload;
   // Raw series-item fields (present when value is absent).
   slots?: SeriesSlot[];
+  // Comparison-period slots — returned per-item by resolveAndCompute when
+  // comparisonStartTime/EndTime are sent (Comparison Mode). Same shape as
+  // `slots`; the engine re-exposes these as a parallel DataEntry[].
+  comparisonSlots?: SeriesSlot[];
   meta?: SeriesMeta;
   range?: { from: number; to: number };
   path?: string;
