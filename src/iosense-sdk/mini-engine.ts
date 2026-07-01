@@ -22,7 +22,7 @@ interface MiniEngineCtx {
 export async function resolve(
   envelope: ColumnChartEnvelope,
   ctx: MiniEngineCtx,
-): Promise<{ config: ColumnChartUIConfig; data: DataEntry[]; comparisonData?: DataEntry[] }> {
+): Promise<{ config: ColumnChartUIConfig; data: DataEntry[] }> {
   const { startTime, endTime } = computeWindow(envelope, ctx.override);
   const bindings = envelope.dynamicBindingPathList ?? [];
 
@@ -85,7 +85,7 @@ export async function resolve(
       opts.shifts = shifts;
     }
 
-    const { data: items, comparisonData } = await resolveAndCompute(
+    const { data: items } = await resolveAndCompute(
       ctx.authentication,
       mappedBindings,
       startTime,
@@ -94,8 +94,9 @@ export async function resolve(
     );
 
     // Pass resolveAndCompute items through AS-IS (raw shape) — same as the
-    // production Lens Data Engine. No reshaping/wrapping here.
-    return { config: envelope.uiConfig, data: items, comparisonData };
+    // production Lens Data Engine. Comparison values ride inline on each item as
+    // `comparisonSlots`; the widget extracts them, so no parallel array here.
+    return { config: envelope.uiConfig, data: items };
   } catch {
     return { config: envelope.uiConfig, data: [] };
   }
@@ -120,6 +121,22 @@ export function getSeriesData(key: string, data: DataEntry[]): SeriesPayload | n
     return v as SeriesPayload;
   }
   return null;
+}
+
+// Comparison-period counterpart of getSeriesData: reads the SAME data entry's
+// `comparisonSlots` (present only when Comparison Mode sent a comparison window)
+// and exposes it as a SeriesPayload. Returns null when the item has no
+// comparison slots, so callers can treat "no comparison" uniformly.
+export function getComparisonSeriesData(key: string, data: DataEntry[]): SeriesPayload | null {
+  const entry = data.find((d) => d.key === key);
+  if (!entry || !Array.isArray(entry.comparisonSlots)) return null;
+  return {
+    __type: 'series',
+    path: entry.path ?? '',
+    meta: entry.meta as SeriesPayload['meta'],
+    range: entry.range ?? { from: 0, to: 0 },
+    slots: entry.comparisonSlots,
+  };
 }
 
 function computeWindow(

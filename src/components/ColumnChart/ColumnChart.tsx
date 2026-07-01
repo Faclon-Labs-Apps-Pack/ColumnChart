@@ -33,10 +33,9 @@ import './ColumnChart.css';
 
 interface ColumnChartProps {
   config?: ColumnChartUIConfig;
+  /** Resolved data. In Comparison Mode each series entry also carries the prior
+   *  window inline as `comparisonSlots` — no separate comparisonData prop. */
   data?: DataEntry[];
-  /** Comparison-period data (the prior window), resolved by the engine when
-   *  Comparison Mode is on. Same keys/shape as `data`. */
-  comparisonData?: DataEntry[];
   onEvent: (event: WidgetEvent) => void;
   timeConfig?: TimeConfig;
 }
@@ -133,6 +132,22 @@ function getSeriesData(key: string, data: DataEntry[]): SeriesPayload | null {
     return v as SeriesPayload;
   }
   return null;
+}
+
+// Comparison-period counterpart of getSeriesData: the comparison window rides
+// inline on the SAME data entry as `comparisonSlots` (Comparison Mode only), so
+// we read it straight from `data` — no separate comparisonData array. Returns
+// null when the entry carries no comparison slots.
+function getComparisonSeriesData(key: string, data: DataEntry[]): SeriesPayload | null {
+  const entry = data.find((d) => d.key === key);
+  if (!entry || !Array.isArray(entry.comparisonSlots)) return null;
+  return {
+    __type: 'series',
+    path: entry.path ?? '',
+    meta: entry.meta as SeriesPayload['meta'],
+    range: entry.range ?? { from: 0, to: 0 },
+    slots: entry.comparisonSlots,
+  };
 }
 
 function getValue(key: string, config: unknown, data: DataEntry[]): string | number | null {
@@ -600,19 +615,19 @@ function buildChartDisplayData(
 }
 
 // Build the SDK ColumnChart `comparison` sources for a chart: per regular series,
-// the current-period values (from `data`) aligned with the comparison-period
-// values (from `comparisonData`). Per-source polarity comes from
+// the current-period values (`slots`) aligned with the comparison-period values
+// (`comparisonSlots`) — both read from the SAME `data` entry, so there's no
+// separate comparisonData array. Per-source polarity comes from
 // `overrides[`${chartId}:${seriesId}`]`, else the chart-wide default. Fixed
 // series have no comparison window, so they're excluded.
 function buildChartComparison(
   chart: ChartConfig,
   ci: number,
   data: DataEntry[],
-  comparisonData: DataEntry[],
   overrides?: Record<string, DeviationPattern>,
 ) {
   const curPayloads = chart.series.map((_, i) => getSeriesData(`charts[${ci}].series[${i}].unsPath`, data));
-  const cmpPayloads = chart.series.map((_, i) => getSeriesData(`charts[${ci}].series[${i}].unsPath`, comparisonData));
+  const cmpPayloads = chart.series.map((_, i) => getComparisonSeriesData(`charts[${ci}].series[${i}].unsPath`, data));
 
   const categories = curPayloads.find(Boolean)?.slots.map((s) => s.label) ?? [];
   const comparisonCategories = cmpPayloads.find(Boolean)?.slots.map((s) => s.label) ?? [];
@@ -792,9 +807,9 @@ function periodicityFromConfig(timeConfig?: TimeConfig): Periodicity {
 
 // ── Component ─────────────────────────────────────────────────────────────────
 
-export function ColumnChart({ config = EMPTY_UI_CONFIG, data = [], comparisonData = [], onEvent, timeConfig }: ColumnChartProps) {
+export function ColumnChart({ config = EMPTY_UI_CONFIG, data = [], onEvent, timeConfig }: ColumnChartProps) {
   // eslint-disable-next-line no-console
-  console.log('[ColumnChart] props received', { config, data, comparisonData, timeConfig });
+  console.log('[ColumnChart] props received', { config, data, timeConfig });
   const chartRef = useRef<unknown>(null);
   // Guard: selecting a preset in the SDK DatePicker also fires onRangeChange;
   // this prevents that from clearing the preset / re-emitting (matches GTP).
@@ -1238,13 +1253,15 @@ export function ColumnChart({ config = EMPTY_UI_CONFIG, data = [], comparisonDat
     // the ▲/▼ deviation tooltip. ComboLineChart is NOT used here: it's a
     // column+line combo, so its legend always renders an extra line-encoding
     // "Current/Compare" key that this columns-only widget never has series for.
-    // `buildChartComparison` aligns current (data) and comparison
-    // (comparisonData) values by category; per-source polarity overrides apply
-    // only when Advance Settings is on. (Plot lines/bands aren't passed here, so
-    // they don't render in comparison mode — by design.)
-    const comparisonOn = comparisonModeOn && compareOn && comparisonData.length > 0;
+    // `buildChartComparison` aligns each series' current (`slots`) and
+    // comparison (`comparisonSlots`) values by category — both read from `data`;
+    // per-source polarity overrides apply only when Advance Settings is on.
+    // (Plot lines/bands aren't passed here, so they don't render in comparison
+    // mode — by design.)
+    const hasComparisonData = data.some((d) => Array.isArray(d.comparisonSlots));
+    const comparisonOn = comparisonModeOn && compareOn && hasComparisonData;
     if (comparisonOn) {
-      const cmp = buildChartComparison(chart, ci, data, comparisonData, perSourceOverrides);
+      const cmp = buildChartComparison(chart, ci, data, perSourceOverrides);
       const { series } = buildComparisonSeries({ sources: cmp.sources, deviationPattern });
       return {
         id: chart._id || `chart-${ci}`,

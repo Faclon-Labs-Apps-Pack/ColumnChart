@@ -10,7 +10,6 @@ import './App.css';
 export default function App() {
   const [envelope, setEnvelope] = useState<ColumnChartEnvelope | undefined>(undefined);
   const [data, setData] = useState<DataEntry[]>([]);
-  const [comparisonData, setComparisonData] = useState<DataEntry[]>([]);
   const [auth, setAuth] = useState<string>(localStorage.getItem('bearer_token') ?? '');
   const [timeOverride, setTimeOverride] = useState<{ startTime: number; endTime: number; periodicity?: string; comparisonStartTime?: number; comparisonEndTime?: number } | undefined>(undefined);
   // Widget size is fixed at 880×400 in the dev harness regardless of any
@@ -48,10 +47,9 @@ export default function App() {
   useEffect(() => {
     if (!envelope || !auth) return;
     console.log('[App] resolving envelope:', envelope.dynamicBindingPathList, 'override:', timeOverride);
-    resolve(envelope, { authentication: auth, override: timeOverride }).then(({ data: resolved, comparisonData: cmp }) => {
-      console.log('[App] resolved data:', resolved, 'comparison:', cmp);
+    resolve(envelope, { authentication: auth, override: timeOverride }).then(({ data: resolved }) => {
+      console.log('[App] resolved data:', resolved);
       setData(resolved);
-      setComparisonData(cmp ?? []);
     });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [fetchKey, auth, timeOverride]);
@@ -79,7 +77,7 @@ export default function App() {
         style={envelope ? { flex: '0 0 auto', width: widgetSize.width, height: widgetSize.height } : undefined}
       >
         {envelope ? (
-          <ColumnChart config={envelope.uiConfig} data={data} comparisonData={comparisonData} onEvent={handleEvent} timeConfig={envelope.timeConfig} />
+          <ColumnChart config={envelope.uiConfig} data={data} onEvent={handleEvent} timeConfig={envelope.timeConfig} />
         ) : (
           <div className="app__empty">
             <p className="BodyMediumRegular">Configure the widget in the left panel to preview it here.</p>

@@ -29,9 +29,9 @@ export interface ResolveOptions {
 }
 
 export interface ResolveResult {
+  // Each item carries its own comparison window inline as `comparisonSlots`
+  // (present when comparisonStart/EndTime were sent) — no parallel array.
   data: DataEntry[];
-  // Comparison-period items (present when comparisonStart/EndTime were sent).
-  comparisonData?: DataEntry[];
   // Full raw response — kept so callers can map any shift/comparison shape the
   // backend uses without a second round-trip.
   raw: unknown;
@@ -65,14 +65,9 @@ export async function resolveAndCompute(
   // getSeriesData()/getValue() read this raw shape directly.
   const data = (json?.data ?? []) as DataEntry[];
   // Comparison values ride back PER-ITEM as `comparisonSlots` (same shape as
-  // `slots`) — not a top-level `comparisonData`. Re-expose them as a parallel
-  // DataEntry[] whose `slots` are the comparison slots, so the widget's
-  // getSeriesData()/buildChartComparison consume them with zero special-casing.
-  const hasComparison = data.some((d) => Array.isArray(d.comparisonSlots));
-  const comparisonData = hasComparison
-    ? data.map((d) => ({ ...d, slots: d.comparisonSlots ?? [] }))
-    : undefined;
-  return { data, comparisonData, raw: json };
+  // `slots`) — kept inline on each item. The widget extracts them from `data`
+  // via getComparisonSeriesData(); no parallel comparisonData array is built.
+  return { data, raw: json };
 }
 
 export async function fetchUNSNodes(
