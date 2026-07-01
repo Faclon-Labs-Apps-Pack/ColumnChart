@@ -814,6 +814,16 @@ export function ColumnChart({ config = EMPTY_UI_CONFIG, data = [], onEvent, time
   // Guard: selecting a preset in the SDK DatePicker also fires onRangeChange;
   // this prevents that from clearing the preset / re-emitting (matches GTP).
   const presetSelectingRef = useRef(false);
+  // True only when a range change came from a user action (picking a range or a
+  // preset in the DatePicker). The periodicity-snap effect emits ONLY in that
+  // case — never on first render / programmatic timeConfig sync (host owns the
+  // initial resolve).
+  const userRangeChangeRef = useRef(false);
+  // False until the widget has finished its first commit. The SDK DatePicker
+  // echoes its callbacks (onRangeChange / onPresetSelect / onComparisonRange)
+  // during mount; this gate ensures TIME_CHANGE never fires on the initial
+  // render — the host owns the initial data resolve.
+  const didMountRef = useRef(false);
   // Comparison window picked in the date picker's Compare panel. Kept in a ref
   // (read by emitTimeChange) because the SDK fires the main + comparison range
   // callbacks separately on Apply.
@@ -829,20 +839,29 @@ export function ColumnChart({ config = EMPTY_UI_CONFIG, data = [], onEvent, time
   const selectedDuration =
     timeConfig?.allDurations?.find((d) => d.id === preset) ??
     (timeConfig?.pickerType === 'fixed' ? timeConfig.fixedDuration : undefined);
-  const availablePeriodicities = durationPeriodicities(selectedDuration, range);
-  const [basePeriodicity, setBasePeriodicity] = useState<Periodicity>(() => periodicityFromConfig(timeConfig));
+  // Ordered coarse→fine (Monthly, Weekly, Daily, Hourly) so the highest-order
+  // option is always first — used as the default and the dropdown order.
+  const availablePeriodicities = [...durationPeriodicities(selectedDuration, range)]
+    .sort((a, b) => LEVEL_ORDER.indexOf(a) - LEVEL_ORDER.indexOf(b));
+  // Local picker defaults to the highest-order available periodicity (e.g. Daily
+  // when [Daily, Hourly] are offered); fixed/global stay config-driven.
+  const [basePeriodicity, setBasePeriodicity] = useState<Periodicity>(() =>
+    (timeConfig?.pickerType ?? 'local') === 'local'
+      ? (availablePeriodicities[0] ?? periodicityFromConfig(timeConfig))
+      : periodicityFromConfig(timeConfig),
+  );
   // Mutually-exclusive chart-time mode driven by the DatePicker's Shift /
   // Compare toggles via the SDK's ChartTimeProvider context. 'normal' is the
   // default; switching to 'shift' implicitly turns 'comparison' off and vice
   // versa (the provider enforces this).
   const [chartTimeMode, setChartTimeMode] = useState<ChartTimeMode>('normal');
-  // Comparison settings derived from the time config. `compareOn` reflects the
-  // provider's active mode (ChartTimeProvider enforces Shift/Compare exclusion).
-  // `shiftOn` is the shift-comparison state — a SHIFT-based comparison (columns
-  // zoned per shift), distinct from `compareOn`'s date/time-window comparison.
-  // The provider guarantees the two are mutually exclusive.
+  // Comparison settings derived from the time config. `comparisonModeOn` is the
+  // config master switch (still gates the DatePicker's Compare toggle). Whether
+  // the comparison CHART renders is decided purely by the presence of
+  // comparisonSlots in `data`, not by the active mode. `shiftOn` is the
+  // shift-comparison state (columns zoned per shift), enforced mutually
+  // exclusive with comparison by the provider.
   const comparisonModeOn  = Boolean(timeConfig?.comparisonMode);
-  const compareOn         = chartTimeMode === 'comparison';
   const shiftOn           = chartTimeMode === 'shift' && (timeConfig?.shifts?.length ?? 0) > 0;
   const deviationPattern  = (timeConfig?.deviationPattern ?? 'green-up-positive') as DeviationPattern;
   const perSourceOverrides = timeConfig?.allowPerSourceIndicator ? timeConfig?.sourceDeviationOverrides : undefined;
@@ -908,6 +927,14 @@ export function ColumnChart({ config = EMPTY_UI_CONFIG, data = [], onEvent, time
     console.log('[ColumnChart] data prop:', data);
   }, [data]);
 
+  // Open the emit gate only after the first commit — as a parent effect this
+  // runs after the DatePicker's mount callbacks, so their initial echoes are
+  // suppressed. Cleanup keeps it correct under StrictMode's double-invoke.
+  useEffect(() => {
+    didMountRef.current = true;
+    return () => { didMountRef.current = false; };
+  }, []);
+
   useEffect(() => {
     setShowLegend(config.style.showLegend);
     setShowDataLabels(config.style.showDataLabels);
@@ -919,7 +946,19 @@ export function ColumnChart({ config = EMPTY_UI_CONFIG, data = [], onEvent, time
   // periodicity change, drill-down, etc.). The host owns the initial resolve.
   useEffect(() => {
     const init = initialTimeFromConfig(timeConfig);
-    const periodicity = periodicityFromConfig(timeConfig);
+    // Local picker defaults to the highest-order available periodicity for the
+    // resolved duration/range (e.g. Daily when [Daily, Hourly] are offered);
+    // fixed/global stay config-driven.
+    const isLocal = (timeConfig?.pickerType ?? 'local') === 'local';
+    const dur =
+      timeConfig?.allDurations?.find((d) => d.id === init.presetId) ??
+      (timeConfig?.pickerType === 'fixed' ? timeConfig.fixedDuration : undefined);
+    const periods = [...durationPeriodicities(dur, init.range)].sort(
+      (a, b) => LEVEL_ORDER.indexOf(a) - LEVEL_ORDER.indexOf(b),
+    );
+    const periodicity = isLocal
+      ? periods[0] ?? periodicityFromConfig(timeConfig)
+      : periodicityFromConfig(timeConfig);
     setRange(init.range);
     setPreset(init.presetId);
     setPresetLabel(init.presetLabel);
@@ -941,15 +980,23 @@ export function ColumnChart({ config = EMPTY_UI_CONFIG, data = [], onEvent, time
   ]);
 
   useEffect(() => {
+    // Consume the user-driven flag once per range change: a programmatic sync
+    // (first render / timeConfig arrival) leaves it false, so no emit fires.
+    const userDriven = userRangeChangeRef.current;
+    userRangeChangeRef.current = false;
     // Periodicity in fixed/global is config-driven — don't clobber it. Only the
-    // local picker snaps to the DEFAULT (first available) periodicity when the
-    // current one isn't valid for the new range, and re-emits so data refetches.
+    // local picker snaps to the DEFAULT (highest-order available) periodicity
+    // when the current one isn't valid for the new range.
     if ((timeConfig?.pickerType ?? 'local') !== 'local') return;
     if (!availablePeriodicities.includes(basePeriodicity)) {
       const next = availablePeriodicities[0];
       if (next) {
         setBasePeriodicity(next);
-        emitTimeChange(range.start.getTime(), range.end.getTime(), next.toLowerCase());
+        // Re-emit so data refetches — but only for a user-driven range change,
+        // never on first render / programmatic sync.
+        if (userDriven) {
+          emitTimeChange(range.start.getTime(), range.end.getTime(), next.toLowerCase());
+        }
       }
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -1023,10 +1070,26 @@ export function ColumnChart({ config = EMPTY_UI_CONFIG, data = [], onEvent, time
   const effectiveIdx       = Math.min(baseIdx + drillPath.length, LEVEL_ORDER.length - 1);
   const effectivePeriodicity: Periodicity = LEVEL_ORDER[effectiveIdx];
 
-  function emitTimeChange(startTime: number, endTime: number, periodicity: string) {
+  function emitTimeChange(
+    startTime: number,
+    endTime: number,
+    periodicity: string,
+    // The chart-time mode to emit for. Defaults to the current state, but a
+    // toggle handler must pass the NEXT mode since setChartTimeMode is async.
+    modeOverride?: ChartTimeMode,
+  ) {
+    // Never emit during the initial mount — SDK callbacks echo on first render,
+    // and the host owns the initial resolve. Only real post-mount user actions
+    // reach onEvent.
+    if (!didMountRef.current) return;
+    const mode = modeOverride ?? chartTimeMode;
     // Ride the picked comparison window into the payload (only when Compare is
     // on) so the host fetches that exact prior window.
-    const cr = compareOn ? compRangeRef.current : null;
+    const cr = mode === 'comparison' ? compRangeRef.current : null;
+    // Shift mode resolves server-side: send the configured shifts + aggregation
+    // operator so the host refetches shift-bucketed data.
+    const shiftsOn = mode === 'shift' && (timeConfig?.shifts?.length ?? 0) > 0;
+    console.log("timeConfig",timeConfig);
     onEvent({
       type: 'TIME_CHANGE',
       payload: {
@@ -1036,6 +1099,10 @@ export function ColumnChart({ config = EMPTY_UI_CONFIG, data = [], onEvent, time
         ...(cr ? {
           comparisonStartTime: String(cr.start.getTime()),
           comparisonEndTime:   String(cr.end.getTime()),
+        } : {}),
+        ...(shiftsOn ? {
+          shifts: timeConfig!.shifts,
+          shiftAggregator: timeConfig?.shiftAggregator,
         } : {}),
       },
     });
@@ -1049,6 +1116,19 @@ export function ColumnChart({ config = EMPTY_UI_CONFIG, data = [], onEvent, time
     if (cr) emitTimeChange(range.start.getTime(), range.end.getTime(), basePeriodicity.toLowerCase());
   }
 
+  // Shift/Compare toggle in the DatePicker (via ChartTimeProvider). Shift mode
+  // resolves server-side, so re-emit when ENTERING or LEAVING shift — carrying
+  // the shifts + shiftOperator on entry, and a plain window on exit so the host
+  // refetches un-bucketed. Comparison transitions keep emitting via their own
+  // range-apply callback, so they're not emitted here.
+  function handleChartTimeModeChange(nextMode: ChartTimeMode) {
+    const shiftInvolved = nextMode === 'shift' || chartTimeMode === 'shift';
+    setChartTimeMode(nextMode);
+    if (shiftInvolved) {
+      emitTimeChange(range.start.getTime(), range.end.getTime(), basePeriodicity.toLowerCase(), nextMode);
+    }
+  }
+
   function handleRangeChange(r: DateRange | null) {
     // A preset selection fires onRangeChange too — handlePresetSelect already
     // applied the window, so skip (don't clobber the preset label / re-emit).
@@ -1057,6 +1137,14 @@ export function ColumnChart({ config = EMPTY_UI_CONFIG, data = [], onEvent, time
       return;
     }
     if (!r) return;
+    // The DatePicker echoes onRangeChange with our own controlled `rangeValue`
+    // on mount and whenever we set it programmatically (initial render, timeConfig
+    // arrival). Ignore those echoes — only a genuinely different window is a user
+    // change worth emitting.
+    if (r.start.getTime() === range.start.getTime() && r.end.getTime() === range.end.getTime()) {
+      return;
+    }
+    userRangeChangeRef.current = true;   // allow the snap effect to emit
     setRange(r);
     setDrillPath([]);
     emitTimeChange(r.start.getTime(), r.end.getTime(), basePeriodicity.toLowerCase());
@@ -1091,6 +1179,7 @@ export function ColumnChart({ config = EMPTY_UI_CONFIG, data = [], onEvent, time
     // Respect the configured cycle time when snapping the duration's window.
     const { startTime, endTime } = resolveDurationWindow(dur, Date.now(), timeConfig?.cycleTime);
     presetSelectingRef.current = true;   // block the simultaneous onRangeChange
+    userRangeChangeRef.current = true;   // allow the snap effect to emit
     setRange({ start: new Date(startTime), end: new Date(endTime) });
     setPreset(dur.id);
     setPresetLabel(dur.label || dur.id);
@@ -1258,8 +1347,9 @@ export function ColumnChart({ config = EMPTY_UI_CONFIG, data = [], onEvent, time
     // per-source polarity overrides apply only when Advance Settings is on.
     // (Plot lines/bands aren't passed here, so they don't render in comparison
     // mode — by design.)
-    const hasComparisonData = data.some((d) => Array.isArray(d.comparisonSlots));
-    const comparisonOn = comparisonModeOn && compareOn && hasComparisonData;
+    // Show the comparison chart whenever the engine returned comparison-window
+    // data — no dependency on the config master switch or the Compare toggle.
+    const comparisonOn = data.some((d) => Array.isArray(d.comparisonSlots));
     if (comparisonOn) {
       const cmp = buildChartComparison(chart, ci, data, perSourceOverrides);
       const { series } = buildComparisonSeries({ sources: cmp.sources, deviationPattern });
@@ -1362,6 +1452,7 @@ export function ColumnChart({ config = EMPTY_UI_CONFIG, data = [], onEvent, time
           {periodicityOpen && (
             <DropdownMenu>
               <ActionListItemGroup>
+                {/* availablePeriodicities is pre-sorted coarse→fine. */}
                 {availablePeriodicities.map((p) => (
                   <ActionListItem
                     key={p}
@@ -1484,7 +1575,7 @@ export function ColumnChart({ config = EMPTY_UI_CONFIG, data = [], onEvent, time
       shifts={ctShifts}
       comparison={ctComparison}
       mode={chartTimeMode}
-      onModeChange={setChartTimeMode}
+      onModeChange={handleChartTimeModeChange}
     >
     <div
       className={`cc-widget-shell${advancedSettings?.enabled ? ' cc-widget-shell--title-styled' : ''}`}

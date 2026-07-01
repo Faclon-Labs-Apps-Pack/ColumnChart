@@ -128,6 +128,10 @@ export interface TimeConfig {
   /** Shifts configured in the time tab — non-empty enables the DatePicker's
    *  Shift toggle (auto-discovered via ChartTimeProvider). */
   shifts?: TimeShift[];
+  /** Aggregation operator applied per shift when Shift mode is active (from the
+   *  Time tab's shiftAggregator). Emitted as `shiftOperator` on TIME_CHANGE so
+   *  the host refetches shift-bucketed data. */
+  shiftAggregator?: string;
   /** Comparison Mode flag from the time tab — enables the DatePicker's
    *  Compare toggle (auto-discovered via ChartTimeProvider). */
   comparisonMode?: boolean;
@@ -145,6 +149,10 @@ export type WidgetEvent =
       startTime: string; endTime: string; periodicity: string;
       // Resolved comparison window (when Compare is on in the date picker).
       comparisonStartTime?: string; comparisonEndTime?: string;
+      // Shift mode (when the Shift toggle is on): the configured shifts plus the
+      // aggregation operator (from timeConfig.shiftAggregator), sent so the host
+      // refetches shift-bucketed data.
+      shifts?: TimeShift[]; shiftAggregator?: string;
     } }
   | { type: 'FILTER_CHANGE'; payload: Record<string, unknown> };
 

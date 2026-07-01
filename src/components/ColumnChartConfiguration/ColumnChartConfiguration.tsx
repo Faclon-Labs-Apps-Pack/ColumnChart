@@ -283,6 +283,9 @@ function mapTimeTabToTimeConfig(ttc: TimeTabUIConfig): TimeConfig {
     endTime: s.endTime,
     enabled: true,
   }));
+  // Per-shift aggregation operator, sibling of `shifts` at the top level. The
+  // widget emits it as `shiftOperator` on TIME_CHANGE when Shift mode is on.
+  const shiftAggregator = (ttc as { shiftAggregator?: string }).shiftAggregator;
 
   // Comparison settings live in different places per picker: local at the top
   // level, fixed under `ttc.fixed`, global under `ttc.global`. Capture from the
@@ -315,6 +318,7 @@ function mapTimeTabToTimeConfig(ttc: TimeTabUIConfig): TimeConfig {
       ? fd.periodicity.toLowerCase()
       : ttc.defaultPeriodicity) as TimeConfig['defaultPeriodicity'],
     shifts: shifts.length > 0 ? shifts : undefined,
+    shiftAggregator,
     comparisonMode: Boolean(cmpScope?.comparisonMode),
     deviationPattern: cmpScope?.deviationPattern,
     allowPerSourceIndicator: Boolean(cmpScope?.allowPerSourceIndicator),
