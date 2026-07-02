@@ -991,6 +991,13 @@ export function ColumnChart({ config = EMPTY_UI_CONFIG, data = [], onEvent, time
   const zoomable = true;
   const [scrollable,      setScrollable]      = useState(false);
   const [inexactMultiple, setInexactMultiple] = useState(false);
+  // Latest committed control flags for emitTimeChange — a toggle sets state and
+  // passes its NEW value as an override (state hasn't re-rendered yet); every
+  // other emit site reads the current value off these refs.
+  const clippingRef = useRef(clipping);
+  clippingRef.current = clipping;
+  const inexactMultipleRef = useRef(inexactMultiple);
+  inexactMultipleRef.current = inexactMultiple;
   const widgetElements = config.style.widgetElements ?? {
     hideWidgetElements: false,
     hideSettingsIcon: false,
@@ -1192,6 +1199,7 @@ export function ColumnChart({ config = EMPTY_UI_CONFIG, data = [], onEvent, time
     endTime: number,
     periodicity: string,
     modeFieldsOverride?: Record<string, unknown>,
+    controlsOverride?: { clipping?: boolean; inexactMultiple?: boolean },
   ) {
     // Never emit during the initial mount — SDK callbacks echo on first render,
     // and the host owns the initial resolve. Only real post-mount user actions
@@ -1202,6 +1210,11 @@ export function ColumnChart({ config = EMPTY_UI_CONFIG, data = [], onEvent, time
       startTime: String(startTime),
       endTime:   String(endTime),
       periodicity,
+      // Chart-control flags ride on every TIME_CHANGE so the host always
+      // refetches with the current Clipping / Inexact Multiple state. A toggle
+      // passes its just-set value via controlsOverride (the ref lags a render).
+      clipping:        controlsOverride?.clipping        ?? clippingRef.current,
+      inexactMultiple: controlsOverride?.inexactMultiple ?? inexactMultipleRef.current,
       ...modeFields,
     };
     // eslint-disable-next-line no-console
@@ -1209,16 +1222,14 @@ export function ColumnChart({ config = EMPTY_UI_CONFIG, data = [], onEvent, time
     onEvent({ type: 'TIME_CHANGE', payload });
   }
 
-  // Chart-control toggles (Clipping / Inexact Multiple) from the settings menu.
-  // Emitted so the host can react to / persist the toggle state.
-  function emitChartControlChange(
-    control: 'clipping' | 'inexactMultiple',
-    value: boolean,
-  ) {
-    const payload = { control, value };
-    // eslint-disable-next-line no-console
-    console.log('[ColumnChart] emitting CHART_CONTROL_CHANGE', payload);
-    onEvent({ type: 'CHART_CONTROL_CHANGE', payload });
+  // The window currently on screen — the deepest drill crumb when drilled,
+  // otherwise the top-level range. Used to re-emit TIME_CHANGE on a control
+  // toggle without moving the window.
+  function currentWindow(): { start: number; end: number } {
+    const crumb = drillPath[drillPath.length - 1];
+    return crumb
+      ? { start: crumb.startTime, end: crumb.endTime }
+      : { start: range.start.getTime(), end: range.end.getTime() };
   }
 
   function handleRangeChange(r: DateRange | null) {
@@ -1714,9 +1725,9 @@ export function ColumnChart({ config = EMPTY_UI_CONFIG, data = [], onEvent, time
                   <ActionListItem contentType="SectionHeading" title="Chart Control" />
                   <ActionListItem title="Legends"          selectionType="Multiple" isSelected={showLegend}      onClick={() => setShowLegend((v) => !v)} />
                   <ActionListItem title="Data Labels"      selectionType="Multiple" isSelected={showDataLabels}  onClick={() => setShowDataLabels((v) => !v)} />
-                  <ActionListItem title="Clipping"         selectionType="Multiple" isSelected={clipping}        isDisabled={inexactMultiple} onClick={() => { const next = !clipping; setClipping(next); emitChartControlChange('clipping', next); }} />
+                  <ActionListItem title="Clipping"         selectionType="Multiple" isSelected={clipping}        isDisabled={inexactMultiple} onClick={() => { const next = !clipping; setClipping(next); const w = currentWindow(); emitTimeChange(w.start, w.end, effectivePeriodicity.toLowerCase(), undefined, { clipping: next }); }} />
                   <ActionListItem title="Scroll"           selectionType="Multiple" isSelected={scrollable}      onClick={() => setScrollable((v) => !v)} />
-                  <ActionListItem title="Inexact Multiple" selectionType="Multiple" isSelected={inexactMultiple} onClick={() => { const next = !inexactMultiple; setInexactMultiple(next); emitChartControlChange('inexactMultiple', next); }} />
+                  <ActionListItem title="Inexact Multiple" selectionType="Multiple" isSelected={inexactMultiple} onClick={() => { const next = !inexactMultiple; setInexactMultiple(next); const w = currentWindow(); emitTimeChange(w.start, w.end, effectivePeriodicity.toLowerCase(), undefined, { inexactMultiple: next }); }} />
                 </ActionListItemGroup>
               </DropdownMenu>
             </div>,

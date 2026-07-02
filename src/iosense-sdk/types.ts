@@ -157,14 +157,12 @@ export type WidgetEvent =
       // aggregation operator (from timeConfig.shiftAggregator), sent so the host
       // refetches shift-bucketed data.
       shifts?: TimeShift[]; shiftAggregator?: string;
+      // Chart-control toggles from the settings menu. These ride on TIME_CHANGE
+      // (not a separate event) so a Clipping / Inexact Multiple flip refetches
+      // the current window with the new flags applied.
+      clipping?: boolean; inexactMultiple?: boolean;
     } }
-  | { type: 'FILTER_CHANGE'; payload: Record<string, unknown> }
-  // Chart-control toggles from the settings menu (Clipping / Inexact Multiple).
-  // Emitted so the host can react to / persist the toggle state.
-  | { type: 'CHART_CONTROL_CHANGE'; payload: {
-      control: 'clipping' | 'inexactMultiple';
-      value: boolean;
-    } };
+  | { type: 'FILTER_CHANGE'; payload: Record<string, unknown> };
 
 // ---------------------------------------------------------------------------
 // ColumnChart — widget-specific types
