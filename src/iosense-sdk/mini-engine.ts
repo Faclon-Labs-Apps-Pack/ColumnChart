@@ -4,10 +4,12 @@ import { resolveDurationWindow } from './time';
 
 // Maps widget periodicity values → timeFrame string expected by resolveAndCompute
 const PERIODICITY_TIME_FRAME: Record<string, string> = {
-  hourly:  'hour',
-  daily:   'day',
-  weekly:  'week',
-  monthly: 'month',
+  minute:    'minute',
+  hourly:    'hour',
+  daily:     'day',
+  weekly:    'week',
+  monthly:   'month',
+  quarterly: 'quarter',
 };
 
 interface MiniEngineCtx {

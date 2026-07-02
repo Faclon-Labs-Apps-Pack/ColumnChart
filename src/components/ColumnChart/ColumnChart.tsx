@@ -60,9 +60,12 @@ const EMPTY_UI_CONFIG: ColumnChartUIConfig = {
   },
 };
 
-type Periodicity = 'Hourly' | 'Daily' | 'Weekly' | 'Monthly';
-const ALL_PERIODICITIES: Periodicity[] = ['Hourly', 'Daily', 'Weekly', 'Monthly'];
-const LEVEL_ORDER: Periodicity[] = ['Monthly', 'Weekly', 'Daily', 'Hourly'];
+type Periodicity = 'Minute' | 'Hourly' | 'Daily' | 'Weekly' | 'Monthly' | 'Quarterly';
+const ALL_PERIODICITIES: Periodicity[] = ['Minute', 'Hourly', 'Daily', 'Weekly', 'Monthly', 'Quarterly'];
+// Coarse → fine. Used for dropdown ordering, the default (coarsest-first)
+// selection, and drill-down depth. Quarterly is the coarsest bucket the SDK
+// time-tab offers; Minute is the finest.
+const LEVEL_ORDER: Periodicity[] = ['Quarterly', 'Monthly', 'Weekly', 'Daily', 'Hourly', 'Minute'];
 
 interface DrillEntry { label: string; startTime: number; endTime: number; }
 
@@ -70,8 +73,8 @@ function getAvailablePeriodicities(range: DateRange): Periodicity[] {
   const days = (range.end.getTime() - range.start.getTime()) / 86_400_000;
   if (days <= 2)   return ['Hourly'];
   if (days <= 31)  return ['Hourly', 'Daily'];
-  if (days <= 180) return ['Daily', 'Weekly', 'Monthly'];   // Monthly for quarter windows
-  return ['Daily', 'Weekly', 'Monthly'];
+  if (days <= 180) return ['Daily', 'Weekly', 'Monthly'];
+  return ['Daily', 'Weekly', 'Monthly', 'Quarterly'];   // Quarterly for year+ windows
 }
 
 const MINS_MAP: Record<string, number> = {
@@ -97,15 +100,17 @@ function getPresetPeriodicities(dur: Duration): string[] {
   if (mins <= 60)    return ['minute', 'hour'];
   if (mins <= 1440)  return ['hour'];
   if (mins <= 10080) return ['hour', 'day'];
-  if (mins <= 43200) return ['day'];
-  return ['day', 'month'];
+  if (mins <= 43200) return ['day', 'week'];
+  return ['day', 'week', 'month', 'quarter'];
 }
 
 const RAW_TO_PERIODICITY: Record<string, Periodicity> = {
-  minute: 'Hourly', hour: 'Hourly', hourly: 'Hourly',
+  minute: 'Minute', minutely: 'Minute',
+  hour: 'Hourly', hourly: 'Hourly',
   day: 'Daily', daily: 'Daily',
   week: 'Weekly', weekly: 'Weekly',
   month: 'Monthly', monthly: 'Monthly',
+  quarter: 'Quarterly', quarterly: 'Quarterly',
 };
 
 // Periodicity options for the active duration (mapped to the widget's levels),
@@ -824,12 +829,13 @@ const BUILTIN_PRESETS: Array<{ id: string; label: string }> = [
 
 function periodicityFromConfig(timeConfig?: TimeConfig): Periodicity {
   switch (timeConfig?.defaultPeriodicity) {
-    case 'minute':
-    case 'hourly':  return 'Hourly';
-    case 'weekly':  return 'Weekly';
-    case 'monthly': return 'Monthly';
-    case 'daily':   return 'Daily';
-    default:        return 'Daily';
+    case 'minute':    return 'Minute';
+    case 'hourly':    return 'Hourly';
+    case 'weekly':    return 'Weekly';
+    case 'monthly':   return 'Monthly';
+    case 'quarterly': return 'Quarterly';
+    case 'daily':     return 'Daily';
+    default:          return 'Daily';
   }
 }
 

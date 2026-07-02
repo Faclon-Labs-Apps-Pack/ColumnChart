@@ -97,7 +97,7 @@ export default (env, argv) => {
       devServer: {
         static: path.resolve(__dirname, 'public'),
         host: '0.0.0.0',
-        port: 3003,
+        port: 3000,
         hot: true,
         open: false,
         historyApiFallback: true,

@@ -128,7 +128,7 @@ export interface TimeConfig {
   fixedDuration?: Duration;
   defaultDurationId: string;
   allDurations: Duration[];
-  defaultPeriodicity: 'minute' | 'hourly' | 'daily' | 'weekly' | 'monthly';
+  defaultPeriodicity: 'minute' | 'hourly' | 'daily' | 'weekly' | 'monthly' | 'quarterly';
   /** Shifts configured in the time tab — non-empty enables the DatePicker's
    *  Shift toggle (auto-discovered via ChartTimeProvider). */
   shifts?: TimeShift[];
