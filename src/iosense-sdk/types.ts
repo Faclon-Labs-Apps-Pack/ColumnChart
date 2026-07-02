@@ -13,6 +13,10 @@ export interface SeriesSlot {
   value: number | null;
   quality: string;
   isPartial?: boolean;
+  /** Shift NAME the backend tagged this bucket with (present only when the
+   *  TIME_CHANGE request carried a `shifts` array — Shift mode). Used to plot
+   *  each bucket under the correct shift series; drives `hasShiftData`. */
+  shift?: string;
 }
 
 export interface SeriesAggregation {

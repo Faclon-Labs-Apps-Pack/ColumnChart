@@ -15,14 +15,20 @@ import { IconButton } from '@faclon-labs/design-sdk/IconButton';
 import { Home, Settings, Menu, Info } from 'react-feather';
 import { Tooltip } from '@faclon-labs/design-sdk/Tooltip';
 import { EmptyState, NoDataOneIllustration, AddWidgetIllustration } from '@faclon-labs/design-sdk/EmptyState';
-import { ChartTimeProvider, buildShiftSeries, buildComparisonSeries, type DeviationPattern } from '@faclon-labs/design-sdk';
-import type { ChartTimeMode } from '@faclon-labs/design-sdk';
+import type {
+  ChartComparisonConfig,
+  ComparisonSeriesInput,
+  ChartShiftConfig,
+  ShiftSeriesInput,
+  DeviationPattern,
+} from '@faclon-labs/design-sdk';
 import {
   DataEntry,
   WidgetEvent,
   ColumnChartUIConfig,
   ChartConfig,
   SeriesPayload,
+  SeriesSlot,
   WidgetAdvancedSettingsConfig,
   WidgetFontWeight,
   TimeConfig,
@@ -614,101 +620,88 @@ function buildChartDisplayData(
   return { resolvedSeries, resolvedSeriesIds, categories, plotLines, plotBands, yAxisUnit, firstPayload, highchartsOptions };
 }
 
-// Build the SDK ColumnChart `comparison` sources for a chart: per regular series,
-// the current-period values (`slots`) aligned with the comparison-period values
-// (`comparisonSlots`) — both read from the SAME `data` entry, so there's no
-// separate comparisonData array. Per-source polarity comes from
-// `overrides[`${chartId}:${seriesId}`]`, else the chart-wide default. Fixed
-// series have no comparison window, so they're excluded.
-function buildChartComparison(
-  chart: ChartConfig,
-  ci: number,
-  data: DataEntry[],
-  overrides?: Record<string, DeviationPattern>,
-) {
-  const curPayloads = chart.series.map((_, i) => getSeriesData(`charts[${ci}].series[${i}].unsPath`, data));
-  const cmpPayloads = chart.series.map((_, i) => getComparisonSeriesData(`charts[${ci}].series[${i}].unsPath`, data));
+// ── Mode payload helpers (mirror the LineChart widget) ──────────────────────────
+// The widget never fetches: it only appends these fields to the TIME_CHANGE it
+// emits, and the host's data layer forwards them to a single resolveAndCompute
+// call. The mode then RENDERS off whatever comes back on the `data` prop.
 
-  const categories = curPayloads.find(Boolean)?.slots.map((s) => s.label) ?? [];
-  const comparisonCategories = cmpPayloads.find(Boolean)?.slots.map((s) => s.label) ?? [];
-  const n = categories.length;
-  const pad = (arr: (number | null)[]) => {
-    const out = arr.slice(0, n);
-    while (out.length < n) out.push(null);
-    return out;
-  };
-
-  const sources = chart.series.map((s, i) => {
-    const cur = curPayloads[i] ? curPayloads[i]!.slots.map((sl) => sl.value ?? null) : new Array(n).fill(null);
-    const cmp = cmpPayloads[i] ? cmpPayloads[i]!.slots.map((sl) => sl.value ?? null) : new Array(n).fill(null);
-    const override = overrides?.[`${chart._id}:${s._id}`];
-    return {
-      id: s._id,
-      name: s.label || `Series ${i + 1}`,
-      current: pad(cur),
-      comparison: pad(cmp),
-      seriesType: 'column' as const,
-      ...(s.color ? { color: s.color } : {}),
-      ...(override ? { deviationPattern: override } : {}),
-    };
-  });
-
-  return { sources, categories, comparisonCategories };
+// Previous-period window for Comparison mode: same duration as the current
+// window, shifted back so it ENDS exactly where the current window STARTS.
+// Returned as the TIME_CHANGE fields the data layer forwards to resolveAndCompute.
+function comparisonWindowPayload(
+  startMs: number,
+  endMs: number,
+): { comparisonStartTime: string; comparisonEndTime: string } {
+  const dur = endMs - startMs;
+  return { comparisonStartTime: String(startMs - dur), comparisonEndTime: String(startMs) };
 }
 
-// ── Shift bucketing ────────────────────────────────────────────────────────────
-// Shift comparison mode is "shift-zoned": each fetched time slot belongs to the
-// one shift whose time-of-day window contains it, so the column for that slot is
-// colored by its shift. These helpers map a slot's epoch timestamp → shift index.
-
-// Parse a "HH:mm" time-of-day into minutes since midnight (NaN if malformed).
-function parseTimeOfDayMinutes(hhmm: string): number {
-  const m = /^(\d{1,2}):(\d{2})$/.exec((hhmm ?? '').trim());
-  if (!m) return NaN;
-  return Number(m[1]) * 60 + Number(m[2]);
+// Map the configurator's Shift Aggregator label (Sum/Average/Min/Max/First/Last)
+// to the backend operator vocabulary used by resolveAndCompute's aggregation
+// (`mean` for Average; the rest pass through lowercased).
+const SHIFT_AGGREGATOR_OPERATOR: Record<string, string> = {
+  sum: 'sum',
+  average: 'mean',
+  mean: 'mean',
+  min: 'min',
+  max: 'max',
+  first: 'first',
+  last: 'last',
+};
+function shiftAggregatorOperator(label?: string): string | undefined {
+  if (!label) return undefined;
+  return SHIFT_AGGREGATOR_OPERATOR[label.toLowerCase()] ?? label.toLowerCase();
 }
 
-// A slot's time-of-day in MINUTES, resolved in the widget's configured timezone
-// (so a slot's shift doesn't drift with the dev machine's locale). Falls back to
-// the browser-local time-of-day when no/!invalid timezone is supplied.
-function timeOfDayMinutes(ts: number, timeZone?: string): number {
-  if (timeZone) {
+// Shift fields for a TIME_CHANGE payload — the configured shift windows plus the
+// resolved aggregator operator. The data layer forwards these to
+// resolveAndCompute so the backend buckets each series into the shift windows and
+// tags each returned slot with its shift name. Returns {} when there are no
+// shifts (nothing to send).
+function shiftEventPayload(
+  shifts: TimeConfig['shifts'],
+  aggregator?: string,
+): { shifts?: TimeConfig['shifts']; shiftAggregator?: string } {
+  if (!shifts || !shifts.length) return {};
+  return { shifts, shiftAggregator: shiftAggregatorOperator(aggregator) };
+}
+
+// ── Shift time-window fallback ──────────────────────────────────────────────────
+// The backend tags each bucket with its shift NAME (slot.shift). These helpers
+// are the FALLBACK used only when a bucket carries no tag (older backend): they
+// derive the shift from the slot's time-of-day against the configured window.
+
+// Return the time-of-day in minutes (0–1439) for a Unix ms timestamp, respecting
+// the configured timezone when provided (falls back to browser-local).
+function slotMinutesOfDay(timestampMs: number, timezone?: string): number {
+  if (timezone) {
     try {
       const parts = new Intl.DateTimeFormat('en-US', {
-        timeZone, hour: '2-digit', minute: '2-digit', hour12: false,
-      }).formatToParts(new Date(ts));
-      const h = Number(parts.find((p) => p.type === 'hour')?.value ?? '0') % 24;
-      const mm = Number(parts.find((p) => p.type === 'minute')?.value ?? '0');
-      return h * 60 + mm;
+        timeZone: timezone, hour: 'numeric', minute: 'numeric', hour12: false,
+      }).formatToParts(new Date(timestampMs));
+      const h = Number(parts.find((p) => p.type === 'hour')?.value ?? 0) % 24;
+      const m = Number(parts.find((p) => p.type === 'minute')?.value ?? 0);
+      return h * 60 + m;
     } catch { /* fall through to local */ }
   }
-  const d = new Date(ts);
+  const d = new Date(timestampMs);
   return d.getHours() * 60 + d.getMinutes();
 }
 
-// Is `tod` (minutes since midnight) inside a shift window that may wrap past
-// midnight, e.g. 22:00 → 06:00? Equal start/end = a full-day shift.
-function timeInShiftWindow(tod: number, startMin: number, endMin: number): boolean {
-  if (Number.isNaN(startMin) || Number.isNaN(endMin)) return false;
-  if (startMin === endMin) return true;
-  if (startMin < endMin) return tod >= startMin && tod < endMin;
-  return tod >= startMin || tod < endMin; // wraps midnight
-}
-
-// Index of the first shift whose time-of-day window contains `ts`, or -1 when a
-// slot falls outside every configured shift (it's then dropped from all shifts).
-function shiftIndexForTimestamp(
-  ts: number,
-  shiftDefs: Array<{ startTime: string; endTime: string }>,
-  timeZone?: string,
-): number {
-  const tod = timeOfDayMinutes(ts, timeZone);
-  for (let i = 0; i < shiftDefs.length; i++) {
-    if (timeInShiftWindow(tod, parseTimeOfDayMinutes(shiftDefs[i].startTime), parseTimeOfDayMinutes(shiftDefs[i].endTime))) {
-      return i;
-    }
-  }
-  return -1;
+// True if the slot's time-of-day falls inside the shift window. Handles night
+// shifts that cross midnight (startTime > endTime).
+function isSlotInShift(
+  timestampMs: number,
+  startTime: string,
+  endTime: string,
+  timezone?: string,
+): boolean {
+  const slotMin = slotMinutesOfDay(timestampMs, timezone);
+  const [sh, sm = 0] = startTime.split(':').map(Number);
+  const [eh, em = 0] = endTime.split(':').map(Number);
+  const s = sh * 60 + sm;
+  const e = eh * 60 + em;
+  return s < e ? slotMin >= s && slotMin < e : slotMin >= s || slotMin < e;
 }
 
 // ── Time-config → date-picker mapping ──────────────────────────────────────────
@@ -824,11 +817,9 @@ export function ColumnChart({ config = EMPTY_UI_CONFIG, data = [], onEvent, time
   // during mount; this gate ensures TIME_CHANGE never fires on the initial
   // render — the host owns the initial data resolve.
   const didMountRef = useRef(false);
-  // Comparison window picked in the date picker's Compare panel. Kept in a ref
-  // (read by emitTimeChange) because the SDK fires the main + comparison range
-  // callbacks separately on Apply.
-  const compRangeRef = useRef<{ start: Date; end: Date } | null>(null);
-  const [compRange, setCompRange] = useState<{ start: Date; end: Date } | null>(null);
+  // Controlled DatePicker popover state — needed so we can sync the draft Shift /
+  // Compare toggles from their committed values every time the picker opens.
+  const [datePickerOpen, setDatePickerOpen] = useState(false);
 
   const [preset, setPreset] = useState(() => initialTimeFromConfig(timeConfig).presetId);
   const [presetLabel, setPresetLabel] = useState(() => initialTimeFromConfig(timeConfig).presetLabel);
@@ -850,21 +841,92 @@ export function ColumnChart({ config = EMPTY_UI_CONFIG, data = [], onEvent, time
       ? (availablePeriodicities[0] ?? periodicityFromConfig(timeConfig))
       : periodicityFromConfig(timeConfig),
   );
-  // Mutually-exclusive chart-time mode driven by the DatePicker's Shift /
-  // Compare toggles via the SDK's ChartTimeProvider context. 'normal' is the
-  // default; switching to 'shift' implicitly turns 'comparison' off and vice
-  // versa (the provider enforces this).
-  const [chartTimeMode, setChartTimeMode] = useState<ChartTimeMode>('normal');
-  // Comparison settings derived from the time config. `comparisonModeOn` is the
-  // config master switch (still gates the DatePicker's Compare toggle). Whether
-  // the comparison CHART renders is decided purely by the presence of
-  // comparisonSlots in `data`, not by the active mode. `shiftOn` is the
-  // shift-comparison state (columns zoned per shift), enforced mutually
-  // exclusive with comparison by the provider.
-  const comparisonModeOn  = Boolean(timeConfig?.comparisonMode);
-  const shiftOn           = chartTimeMode === 'shift' && (timeConfig?.shifts?.length ?? 0) > 0;
+  // ── Shift / Compare mode (DatePicker toggles, driven by DATA not the toggle) ──
+  // The golden rule: the toggle only decides whether the widget REQUESTS the
+  // extra data via TIME_CHANGE. Once that data lands on `data`, the mode RENDERS
+  // regardless of the current toggle state (see hasShiftData / hasComparisonData
+  // / chartMode below). Shift and Compare are mutually exclusive.
+  const cfgShifts = timeConfig?.shifts ?? [];
+  const cfgShiftAggregator = timeConfig?.shiftAggregator;
+  const cfgShiftKey = cfgShifts.map((s) => s.id).join('|');
+  const cfgComparisonMode = Boolean(timeConfig?.comparisonMode);
   const deviationPattern  = (timeConfig?.deviationPattern ?? 'green-up-positive') as DeviationPattern;
   const perSourceOverrides = timeConfig?.allowPerSourceIndicator ? timeConfig?.sourceDeviationOverrides : undefined;
+
+  // Committed (applied) vs draft (in-picker) toggle state. Draft is synced from
+  // committed every time the picker opens; committed is set on Apply
+  // (commitToggles, fired from the DatePicker's onRangeChange).
+  const [shiftToggleOn, setShiftToggleOn] = useState(false);
+  const [draftShiftOn, setDraftShiftOn] = useState(false);
+  const [comparisonToggleOn, setComparisonToggleOn] = useState(false);
+  const [draftComparisonOn, setDraftComparisonOn] = useState(false);
+  // Which shift chips are toggled on in the chart legend — all enabled by
+  // default; reset to all-on whenever the configured shift list changes.
+  const [enabledShiftIds, setEnabledShiftIds] = useState<Set<string>>(new Set());
+  useEffect(() => {
+    setEnabledShiftIds(new Set(cfgShifts.map((s) => s.id)));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [cfgShiftKey]);
+  // Turning a mode off in config force-clears its toggles so a stale "on" can't
+  // keep requesting data the config no longer supports.
+  useEffect(() => {
+    if (!cfgComparisonMode) { setComparisonToggleOn(false); setDraftComparisonOn(false); }
+  }, [cfgComparisonMode]);
+  useEffect(() => {
+    if (cfgShifts.length === 0) { setShiftToggleOn(false); setDraftShiftOn(false); }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [cfgShiftKey]);
+
+  // Shift and comparison are mutually exclusive — activating one clears the other.
+  const draftActivateShift = (on: boolean) => {
+    setDraftShiftOn(on);
+    if (on) setDraftComparisonOn(false);
+  };
+  const draftActivateComparison = (on: boolean) => {
+    setDraftComparisonOn(on);
+    if (on) setDraftShiftOn(false);
+  };
+  const commitToggles = () => {
+    setShiftToggleOn(draftShiftOn);
+    setComparisonToggleOn(draftComparisonOn);
+  };
+  const syncDraftFromCommitted = () => {
+    setDraftShiftOn(shiftToggleOn);
+    setDraftComparisonOn(comparisonToggleOn);
+  };
+
+  // Latest committed mode flags for the TIME_CHANGE emitters that fire from
+  // effects/callbacks whose dependency lists don't track them (mount snap,
+  // preset, periodicity, drilldown). onRangeChange builds its fields inline from
+  // the just-committed draft values instead (refs haven't re-rendered yet).
+  const comparisonActiveRef = useRef(false);
+  comparisonActiveRef.current = cfgComparisonMode && comparisonToggleOn;
+  const shiftActiveRef = useRef(false);
+  shiftActiveRef.current = shiftToggleOn && cfgShifts.length > 0;
+
+  // Extra TIME_CHANGE fields for the currently committed mode (at most one —
+  // shift and comparison are mutually exclusive).
+  const modeEventFields = (startMs: number, endMs: number) =>
+    shiftActiveRef.current
+      ? shiftEventPayload(cfgShifts, cfgShiftAggregator)
+      : comparisonActiveRef.current
+        ? comparisonWindowPayload(startMs, endMs)
+        : {};
+
+  // ── Mode detection — DRIVEN BY DATA, not by the toggle ──────────────────────
+  // Comparison wins if both are somehow present (they're exclusive by
+  // construction). hasComparisonData: any series payload carries comparisonSlots
+  // with a numeric value. hasShiftData: any series slot carries a non-empty
+  // string `shift` tag (the backend tags each bucket with its shift NAME).
+  const hasComparisonData = data.some(
+    (d) => Array.isArray(d.comparisonSlots) && d.comparisonSlots.some((sl) => typeof sl?.value === 'number'),
+  );
+  const hasShiftData = data.some(
+    (d) => Array.isArray(d.slots) && d.slots.some((sl) => typeof sl?.shift === 'string' && sl.shift.length > 0),
+  );
+  const chartMode: 'normal' | 'comparison' | 'shift' =
+    hasComparisonData ? 'comparison' : hasShiftData ? 'shift' : 'normal';
+
   const [periodicityOpen, setPeriodicityOpen] = useState(false);
   const [drillPath, setDrillPath] = useState<DrillEntry[]>([]);
 
@@ -1070,63 +1132,32 @@ export function ColumnChart({ config = EMPTY_UI_CONFIG, data = [], onEvent, time
   const effectiveIdx       = Math.min(baseIdx + drillPath.length, LEVEL_ORDER.length - 1);
   const effectivePeriodicity: Periodicity = LEVEL_ORDER[effectiveIdx];
 
+  // Every emit site funnels through here. `modeEventFields(startTime, endTime)`
+  // appends the current committed mode's extra fields (shift OR comparison OR
+  // none) — so shift/compare requests ride along automatically from mount snap,
+  // preset select, periodicity change, and drilldown. onRangeChange commits the
+  // toggles synchronously, so it passes its own draft-derived fields as
+  // `modeFieldsOverride` (the refs haven't re-rendered yet at that point).
   function emitTimeChange(
     startTime: number,
     endTime: number,
     periodicity: string,
-    // The chart-time mode to emit for. Defaults to the current state, but a
-    // toggle handler must pass the NEXT mode since setChartTimeMode is async.
-    modeOverride?: ChartTimeMode,
+    modeFieldsOverride?: Record<string, unknown>,
   ) {
     // Never emit during the initial mount — SDK callbacks echo on first render,
     // and the host owns the initial resolve. Only real post-mount user actions
     // reach onEvent.
     if (!didMountRef.current) return;
-    const mode = modeOverride ?? chartTimeMode;
-    // Ride the picked comparison window into the payload (only when Compare is
-    // on) so the host fetches that exact prior window.
-    const cr = mode === 'comparison' ? compRangeRef.current : null;
-    // Shift mode resolves server-side: send the configured shifts + aggregation
-    // operator so the host refetches shift-bucketed data.
-    const shiftsOn = mode === 'shift' && (timeConfig?.shifts?.length ?? 0) > 0;
-    console.log("timeConfig",timeConfig);
-    onEvent({
-      type: 'TIME_CHANGE',
-      payload: {
-        startTime: String(startTime),
-        endTime:   String(endTime),
-        periodicity,
-        ...(cr ? {
-          comparisonStartTime: String(cr.start.getTime()),
-          comparisonEndTime:   String(cr.end.getTime()),
-        } : {}),
-        ...(shiftsOn ? {
-          shifts: timeConfig!.shifts,
-          shiftAggregator: timeConfig?.shiftAggregator,
-        } : {}),
-      },
-    });
-  }
-
-  // The picker fires the comparison-range callback separately on Apply — stash
-  // the window and re-emit so the host refetches with it.
-  function handleComparisonRangeChange(cr: { start: Date; end: Date } | null) {
-    compRangeRef.current = cr;
-    setCompRange(cr);
-    if (cr) emitTimeChange(range.start.getTime(), range.end.getTime(), basePeriodicity.toLowerCase());
-  }
-
-  // Shift/Compare toggle in the DatePicker (via ChartTimeProvider). Shift mode
-  // resolves server-side, so re-emit when ENTERING or LEAVING shift — carrying
-  // the shifts + shiftOperator on entry, and a plain window on exit so the host
-  // refetches un-bucketed. Comparison transitions keep emitting via their own
-  // range-apply callback, so they're not emitted here.
-  function handleChartTimeModeChange(nextMode: ChartTimeMode) {
-    const shiftInvolved = nextMode === 'shift' || chartTimeMode === 'shift';
-    setChartTimeMode(nextMode);
-    if (shiftInvolved) {
-      emitTimeChange(range.start.getTime(), range.end.getTime(), basePeriodicity.toLowerCase(), nextMode);
-    }
+    const modeFields = modeFieldsOverride ?? modeEventFields(startTime, endTime);
+    const payload = {
+      startTime: String(startTime),
+      endTime:   String(endTime),
+      periodicity,
+      ...modeFields,
+    };
+    // eslint-disable-next-line no-console
+    console.log('[ColumnChart] emitting TIME_CHANGE', payload);
+    onEvent({ type: 'TIME_CHANGE', payload });
   }
 
   function handleRangeChange(r: DateRange | null) {
@@ -1138,16 +1169,31 @@ export function ColumnChart({ config = EMPTY_UI_CONFIG, data = [], onEvent, time
     }
     if (!r) return;
     // The DatePicker echoes onRangeChange with our own controlled `rangeValue`
-    // on mount and whenever we set it programmatically (initial render, timeConfig
-    // arrival). Ignore those echoes — only a genuinely different window is a user
-    // change worth emitting.
-    if (r.start.getTime() === range.start.getTime() && r.end.getTime() === range.end.getTime()) {
-      return;
-    }
+    // on mount and whenever we set it programmatically. A pure echo is one where
+    // BOTH the window and the draft toggles are unchanged — ignore only those, so
+    // that a toggle-only Apply (same window, Shift/Compare flipped) still emits.
+    const rangeUnchanged =
+      r.start.getTime() === range.start.getTime() && r.end.getTime() === range.end.getTime();
+    const togglesUnchanged =
+      draftShiftOn === shiftToggleOn && draftComparisonOn === comparisonToggleOn;
+    if (rangeUnchanged && togglesUnchanged) return;
+    // Apply the draft Shift / Compare toggles.
+    commitToggles();
     userRangeChangeRef.current = true;   // allow the snap effect to emit
     setRange(r);
     setDrillPath([]);
-    emitTimeChange(r.start.getTime(), r.end.getTime(), basePeriodicity.toLowerCase());
+    // Build the mode fields from the JUST-committed draft values — the committed
+    // refs won't reflect commitToggles() until the next render.
+    const s = r.start.getTime();
+    const e = r.end.getTime();
+    const shiftActive = draftShiftOn && cfgShifts.length > 0;
+    const compActive  = cfgComparisonMode && draftComparisonOn;
+    const modeFields = shiftActive
+      ? shiftEventPayload(cfgShifts, cfgShiftAggregator)
+      : compActive
+        ? comparisonWindowPayload(s, e)
+        : {};
+    emitTimeChange(s, e, basePeriodicity.toLowerCase(), modeFields);
     // `preset` / `presetLabel` are owned ONLY by onPresetSelect — the SDK fires
     // onPresetSelect('custom') itself for a manual range/day pick. Touching them
     // here made a named built-in preset's chip fall back to "Custom" (the SDK
@@ -1286,73 +1332,57 @@ export function ColumnChart({ config = EMPTY_UI_CONFIG, data = [], onEvent, time
       highchartsOptions,
     };
 
-    // ── Shift comparison mode ─────────────────────────────────────────────────
-    // When the user flips the DatePicker's Shift toggle AND the time config
-    // carries shifts, reshape per-source data via `buildShiftSeries` and pass it
-    // through the SDK ColumnChart's `shift` prop. The SDK renders shift-zoned
-    // columns (each colored by its shift) + a ShiftLegend chip row.
-    //
-    // The mini-engine returns flat time-of-day slots (no shift split server-side),
-    // so we bucket them here: each slot lands in the ONE shift whose time-of-day
-    // window contains it (`shiftIndexForTimestamp`, timezone-aware). A slot maps
-    // to a single shift, giving the zoned look; slots outside every window (-1)
-    // are dropped from all shift series.
-    if (shiftOn && timeConfig?.shifts && timeConfig.shifts.length > 0) {
-      const shiftDefs = timeConfig.shifts.map((s) => ({
-        id: s.id, name: s.name, color: s.color,
-        startTime: s.startTime, endTime: s.endTime,
-      }));
-      const enabledIds = new Set(timeConfig.shifts.filter((s) => s.enabled !== false).map((s) => s.id));
-      const slots = firstPayload?.slots ?? [];
-      const buckets = slots.length || categories.length;
-      // Pre-resolve each bucket → shift index once (shared across every source).
-      const shiftIdxByBucket = Array.from({ length: buckets }, (_, j) =>
-        slots[j] ? shiftIndexForTimestamp(slots[j].from, shiftDefs, timeConfig.timezone) : -1,
-      );
-      const sources = resolvedSeries.map((s) => {
-        const flatValues = (s.data as (number | null)[]).slice(0, buckets);
-        // For each shift, keep a bucket's value only when that bucket belongs to
-        // this shift; everything else is null so the SDK draws no column there.
-        const valuesByShift = shiftDefs.map((_, shiftIdx) =>
-          Array.from({ length: buckets }, (_, j) =>
-            shiftIdxByBucket[j] === shiftIdx ? (flatValues[j] ?? null) : null,
-          ),
-        );
-        return { id: s.name, name: s.name, valuesByShift };
+    // ── Comparison mode (DRIVEN BY DATA) ────────────────────────────────────────
+    // Rendered whenever the resolved series carry comparisonSlots (chartMode ===
+    // 'comparison') — independent of the current Compare toggle. Per source we
+    // emit TWO ComparisonSeriesInput entries: the current-period columns (solid,
+    // in legend) and the previous-period columns (patterned, out of legend)
+    // carrying the per-bucket deviation % = round(((cur-prev)/|prev|)*1000)/10
+    // (null when prev is 0/null). comparisonSlots is index-aligned to the current
+    // window's buckets (comparisonSlots[k] pairs with slots[k]). The SDK column
+    // encoder colors both periods by the source color and distinguishes them by
+    // fill pattern (patternIndex 0 = current / 1 = comparison). Per-source
+    // deviation polarity overrides apply only when allowPerSourceIndicator is on.
+    if (chartMode === 'comparison') {
+      const curPayloads = chart.series.map((_, i) => getSeriesData(`charts[${ci}].series[${i}].unsPath`, data));
+      const comparisonCategories =
+        chart.series
+          .map((_, i) => getComparisonSeriesData(`charts[${ci}].series[${i}].unsPath`, data))
+          .find(Boolean)?.slots.map((s) => s.label) ?? categories;
+      const out: ComparisonSeriesInput[] = [];
+      chart.series.forEach((s, i) => {
+        const name = s.label || `Series ${i + 1}`;
+        const cur = curPayloads[i];
+        const cmp = getComparisonSeriesData(`charts[${ci}].series[${i}].unsPath`, data);
+        const currentData = categories.map((_, k) => {
+          const v = cur?.slots[k]?.value;
+          return typeof v === 'number' ? v : null;
+        });
+        const prevData = categories.map((_, k) => {
+          const v = cmp?.slots[k]?.value;
+          return typeof v === 'number' ? v : null;
+        });
+        const deviation = currentData.map((y, k) => {
+          const p = prevData[k];
+          if (y === null || p === null || p === 0) return null;
+          return Math.round(((y - p) / Math.abs(p)) * 1000) / 10;
+        });
+        const pattern =
+          (perSourceOverrides?.[`${chart._id}:${s._id}`] as DeviationPattern) ?? deviationPattern;
+        const meta = { sourceId: s._id, sourceName: name, sourceIndex: i, ...(s.color ? { shiftColor: s.color } : {}) };
+        out.push({
+          ...meta, shiftId: 'current', shiftName: name, shiftIndex: 0,
+          data: currentData, seriesType: 'column', patternIndex: 0, showInLegend: true,
+        });
+        out.push({
+          ...meta, shiftId: 'comparison', shiftName: `${name} (prev)`, shiftIndex: 1,
+          data: prevData, seriesType: 'column', patternIndex: 1, dashStyle: 'Dash',
+          showInLegend: false, deviation, deviationPattern: pattern,
+        });
       });
-      const built = buildShiftSeries({
-        range: { start: new Date(firstPayload?.range?.from ?? 0), end: new Date(firstPayload?.range?.to ?? 0) },
-        periodicity: effectivePeriodicity,
-        shifts: shiftDefs,
-        sources,
-        enabledShiftIds: enabledIds,
-      });
-      sharedChartProps.shift = { series: built.series };
-      sharedChartProps.categories = built.categories;
-      // Top-level series ignored in shift mode per the SDK contract — drop it
-      // to make the intent explicit.
-      delete sharedChartProps.series;
-    }
-
-    // ── Comparison mode ────────────────────────────────────────────────────
-    // When Compare is the active mode, the master switch is on, and the engine
-    // returned a comparison window, render through the SDK ColumnChart's native
-    // `comparison` prop (per its "Comparison" example) — it draws the
-    // current-vs-comparison columns (solid = current, hatched = comparison) plus
-    // the ▲/▼ deviation tooltip. ComboLineChart is NOT used here: it's a
-    // column+line combo, so its legend always renders an extra line-encoding
-    // "Current/Compare" key that this columns-only widget never has series for.
-    // `buildChartComparison` aligns each series' current (`slots`) and
-    // comparison (`comparisonSlots`) values by category — both read from `data`;
-    // per-source polarity overrides apply only when Advance Settings is on.
-    // (Plot lines/bands aren't passed here, so they don't render in comparison
-    // mode — by design.)
-    // Show the comparison chart whenever the engine returned comparison-window
-    // data — no dependency on the config master switch or the Compare toggle.
-    const comparisonOn = data.some((d) => Array.isArray(d.comparisonSlots));
-    if (comparisonOn) {
-      const cmp = buildChartComparison(chart, ci, data, perSourceOverrides);
-      const { series } = buildComparisonSeries({ sources: cmp.sources, deviationPattern });
+      const comparisonProp: ChartComparisonConfig = {
+        series: out, showDeviation: true, deviationPattern, comparisonCategories,
+      };
       return {
         id: chart._id || `chart-${ci}`,
         label: tabLabel,
@@ -1360,8 +1390,8 @@ export function ColumnChart({ config = EMPTY_UI_CONFIG, data = [], onEvent, time
         children: (
           <ColumnChartDisplay
             bare
-            categories={cmp.categories}
-            comparison={{ series, showDeviation: true, comparisonCategories: cmp.comparisonCategories }}
+            categories={categories}
+            comparison={comparisonProp}
             stacked={(chart.stacks ?? []).length > 0 || config.style.stacked}
             showLegend={showLegend}
             showDataLabels={showDataLabels}
@@ -1370,6 +1400,94 @@ export function ColumnChart({ config = EMPTY_UI_CONFIG, data = [], onEvent, time
           />
         ),
       };
+    }
+
+    // ── Shift mode (DRIVEN BY DATA) ─────────────────────────────────────────────
+    // Rendered whenever the backend tagged any bucket with a shift name
+    // (chartMode === 'shift') — independent of the current Shift toggle. Each
+    // source × enabled-shift becomes ONE column series; a bucket's value is
+    // assigned to the shift whose NAME matches the backend's per-bucket
+    // `slot.shift` tag (falling back to a time-window check via isSlotInShift only
+    // when a bucket carries no tag — older backend). The SDK column encoder colors
+    // each series by its shift and renders a ShiftLegend chip row (onToggleShift
+    // flips enabledShiftIds to show/hide each shift). No boundary bridging: columns
+    // are discrete, so there is no continuous line to join across shifts.
+    if (chartMode === 'shift' && cfgShifts.length > 0 && chart.series.length > 0) {
+      const tz = timeConfig?.timezone;
+      const resolved = chart.series.map((s, i) => ({
+        def: s, payload: getSeriesData(`charts[${ci}].series[${i}].unsPath`, data),
+      }));
+      const longest = resolved.reduce<SeriesSlot[]>(
+        (best, r) => ((r.payload?.slots?.length ?? 0) > best.length ? r.payload!.slots : best),
+        [],
+      );
+      if (longest.length > 0) {
+        const catShifts = longest.map((sl) => sl.shift);
+        const catTimestamps = longest.map((sl) => ({ from: sl.from, to: sl.to }));
+        const out: ShiftSeriesInput[] = [];
+        resolved.forEach((r, si) => {
+          const name = r.def.label || `Series ${si + 1}`;
+          const values = longest.map((_, k) => {
+            const v = r.payload?.slots[k]?.value;
+            return typeof v === 'number' ? v : null;
+          });
+          cfgShifts.forEach((shift, shIdx) => {
+            if (!enabledShiftIds.has(shift.id)) return;
+            out.push({
+              sourceId: r.def._id,
+              sourceName: name,
+              sourceIndex: si,
+              shiftId: shift.id,
+              shiftName: shift.name,
+              shiftIndex: shIdx,
+              shiftColor: shift.color,
+              seriesType: 'column',
+              data: values.map((v, k) => {
+                const tag = catShifts[k];
+                // Prefer the backend's per-bucket shift tag (authoritative).
+                if (tag !== undefined && tag !== '') return tag === shift.name ? v : null;
+                // Fallback: derive the shift from the bucket's time-of-day.
+                const ts = catTimestamps[k];
+                if (!ts?.from) return null;
+                return isSlotInShift(ts.from, shift.startTime, shift.endTime, tz) ? v : null;
+              }),
+            });
+          });
+        });
+        if (out.length > 0) {
+          const shiftProp: ChartShiftConfig = {
+            series: out,
+            sources: chart.series.map((s, i) => ({ index: i, name: s.label || `Series ${i + 1}` })),
+            shifts: cfgShifts.map((s) => ({ id: s.id, name: s.name, color: s.color, enabled: enabledShiftIds.has(s.id) })),
+            onToggleShift: (id: string) =>
+              setEnabledShiftIds((prev) => {
+                const next = new Set(prev);
+                if (next.has(id)) next.delete(id); else next.add(id);
+                return next;
+              }),
+            onToggleSource: () => {},
+          };
+          return {
+            id: chart._id || `chart-${ci}`,
+            label: tabLabel,
+            type: 'column' as const,
+            // SDK renders its own ShiftLegend chip row in shift mode; suppress the
+            // native series legend so it doesn't show alongside.
+            children: (
+              <ColumnChartDisplay
+                bare
+                categories={categories}
+                shift={shiftProp}
+                stacked={(chart.stacks ?? []).length > 0 || config.style.stacked}
+                showLegend={false}
+                showDataLabels={showDataLabels}
+                yAxisUnit={config.style.yAxisUnit || undefined}
+                scrollable={scrollable}
+              />
+            ),
+          };
+        }
+      }
     }
 
     return {
@@ -1432,15 +1550,27 @@ export function ColumnChart({ config = EMPTY_UI_CONFIG, data = [], onEvent, time
       <DatePicker
         mode="range"
         placeholder="Select range"
+        isOpen={datePickerOpen}
+        onOpenChange={(open: boolean) => {
+          // Sync the draft toggles from committed every time the picker opens, so
+          // an un-applied change from a previous open doesn't leak in.
+          if (open) syncDraftFromCommitted();
+          setDatePickerOpen(open);
+        }}
         rangeValue={range}
         selectedPreset={preset}
         presets={presetOptions}
         onPresetSelect={handlePresetSelect}
         onRangeChange={handleRangeChange}
-        {...(comparisonModeOn ? {
-          comparisonRangeValue: compRange,
-          onComparisonRangeChange: handleComparisonRangeChange,
-        } : {})}
+        // Compare toggle — only offered when the config enables comparison mode.
+        showComparison={cfgComparisonMode}
+        comparisonEnabled={draftComparisonOn}
+        onComparisonToggle={draftActivateComparison}
+        // Shift toggle — only offered when the config has shifts. Shift and
+        // Compare are mutually exclusive (draftActivate* enforce it).
+        showShift={cfgShifts.length > 0}
+        shiftEnabled={draftShiftOn}
+        onShiftToggle={draftActivateShift}
       />
       <div style={{ width: 120 }}>
         <SelectInput
@@ -1547,36 +1677,12 @@ export function ColumnChart({ config = EMPTY_UI_CONFIG, data = [], onEvent, time
 
   // ── Render ────────────────────────────────────────────────────────────────
 
-  // ChartTimeProvider auto-discovers the DatePicker's Shift / Compare toggles
-  // from these props — `shifts={[…]}` lights up the Shift switch in the
-  // calendar popover, `comparison={true}` lights up the Compare switch. Both
-  // come from the user's Time tab config (mapped through TimeConfig). When
-  // either array/flag is empty/false the corresponding toggle stays hidden.
-  const ctShifts = (timeConfig?.shifts ?? []).map((s) => ({
-    id: s.id,
-    name: s.name,
-    color: s.color,
-    enabled: s.enabled ?? true,
-  }));
-  const ctComparison = Boolean(timeConfig?.comparisonMode);
-  // Debug: surface what the widget hands to ChartTimeProvider so we can see
-  // whether shifts / comparisonMode actually arrive from the Time tab.
-  // eslint-disable-next-line no-console
-  console.log('[ColumnChart] ChartTime inputs:', {
-    pickerType: timeConfig?.pickerType,
-    shiftsCount: ctShifts.length,
-    comparison: ctComparison,
-    hideDatePicker,
-    hasAnySeries,
-  });
+  // The DatePicker's Shift / Compare toggles are wired directly via its
+  // showShift/showComparison + on*Toggle props (see filtersSlot) — no
+  // ChartTimeProvider needed. Mode selection is driven by the resolved `data`
+  // (chartMode), not by the toggle state.
 
   return (
-    <ChartTimeProvider
-      shifts={ctShifts}
-      comparison={ctComparison}
-      mode={chartTimeMode}
-      onModeChange={handleChartTimeModeChange}
-    >
     <div
       className={`cc-widget-shell${advancedSettings?.enabled ? ' cc-widget-shell--title-styled' : ''}`}
       style={widgetTitleStyle}
@@ -1609,6 +1715,5 @@ export function ColumnChart({ config = EMPTY_UI_CONFIG, data = [], onEvent, time
         items={items}
       />
     </div>
-    </ChartTimeProvider>
   );
 }
