@@ -34,8 +34,17 @@
 .cc-widget-shell--title-styled .fds-chart-switcher__prefix,
 .cc-widget-shell--title-styled .fds-chart__title-label {
   font-size: var(--cc-widget-title-font-size) !important;
-  color: var(--cc-widget-title-color);
+  color: var(--cc-widget-title-color) !important;
   font-weight: var(--cc-widget-title-weight) !important;
+}
+
+/* Legend text color. The SDK renders a custom HTML legend
+   (.fds-chart-legend__label) that ignores Highcharts' legend.itemStyle, so the
+   advanced "Legend Text Color" is applied here via a CSS var. Gated behind
+   --title-styled (advanced settings on) and only set when a color is configured,
+   so the SDK default stands otherwise. */
+.cc-widget-shell--title-styled .fds-chart-legend__label {
+  color: var(--cc-widget-legend-color, inherit) !important;
 }
 
 /* Hide the chart title — `ChartSwitcher` is now deprecated and forwards

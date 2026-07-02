@@ -712,6 +712,56 @@ export function ColumnChartConfiguration(props: ColumnChartConfigurationProps) {
     if (config?.timeConfig) setCurrentTimeConfig(config.timeConfig);
   }, [config?.timeConfig]);
 
+  // Workaround for a design-sdk 0.7.7 regression: the pop-out surfaces inside the
+  // TimeTabConfiguration "Add Shift" modal — the Start/End Hour + Minute
+  // `SelectInput` dropdowns (`.fds-select-input__popover`) and the shift-color
+  // `ColorInput` picker (`.fds-color-input__popover`) — render their popover in a
+  // portal ATTACHED TO <body>, OUTSIDE the modal's `.fds-modal__backdrop`. The
+  // modal's document-level outside-pointer-down listener then treats a click on a
+  // dropdown option / color swatch / color canvas as a click outside the modal and
+  // dismisses the whole modal — so the user can never pick an hour or a color.
+  // (Worked in 0.7.3, where these popovers stayed within the modal.)
+  //
+  // Fix: attach a BUBBLE-phase stopPropagation boundary on each popover element as
+  // it is portaled in. The popover's own handlers (option select, color drag,
+  // sliders) run first during the target/bubble phase; the event is then stopped
+  // at the popover boundary before it can bubble up to the modal's document-level
+  // listener. This keeps the modal open WITHOUT breaking any in-popover interaction
+  // (unlike a document-capture guard, which would swallow the color canvas's own
+  // pointerdown). A MutationObserver wires up popovers created after mount.
+  // Remove once the SDK ships a fix.
+  useEffect(() => {
+    const SELECTORS = ['.fds-select-input__popover', '.fds-color-input__popover'];
+    // Stop ONLY the pointer-DOWN events. The modal's outside-click detection
+    // fires on pointerdown/mousedown, so blocking those at the popover boundary
+    // keeps it open. `click` (and pointer/mouse-up) are deliberately left alone —
+    // option selection and color-swatch application dispatch on `click`, which
+    // must still reach the SDK's delegated handler, or picking a value silently
+    // no-ops while the modal stays open.
+    const EVENTS: Array<keyof DocumentEventMap> = ['pointerdown', 'mousedown'];
+    const stop = (e: Event) => e.stopPropagation();
+    const attach = (el: Element) => {
+      if ((el as { __ccPopoverGuard?: boolean }).__ccPopoverGuard) return;
+      (el as { __ccPopoverGuard?: boolean }).__ccPopoverGuard = true;
+      EVENTS.forEach((ev) => el.addEventListener(ev, stop));
+    };
+    const scan = (root: ParentNode) =>
+      SELECTORS.forEach((sel) => root.querySelectorAll?.(sel).forEach(attach));
+    scan(document);
+    const obs = new MutationObserver((muts) => {
+      muts.forEach((m) =>
+        m.addedNodes.forEach((n) => {
+          if (n.nodeType !== 1) return;
+          const el = n as Element;
+          if (SELECTORS.some((sel) => el.matches?.(sel))) attach(el);
+          scan(el);
+        }),
+      );
+    });
+    obs.observe(document.body, { childList: true, subtree: true });
+    return () => obs.disconnect();
+  }, []);
+
   // ── Builders ──────────────────────────────────────────────────────────────
 
   function buildUiConfig(overrides: {
@@ -1329,6 +1379,9 @@ export function ColumnChartConfiguration(props: ColumnChartConfigurationProps) {
   // ── Time ──────────────────────────────────────────────────────────────────
 
   function handleTimeChange(ttcRawInput: TimeTabUIConfig) {
+    // Debug: exactly what the design-sdk TimeTabConfiguration component emits to
+    // us via onChange, before any of our normalization runs.
+    console.log('[TimeTabConfiguration onChange] received value from design-sdk:', ttcRawInput);
     // Bake the cycle-time defaults into the emitted config so they're persisted,
     // not merely shown — and stay idempotent (only blanks fill).
     const ttc    = withCycleDefaults(ttcRawInput as unknown as Record<string, unknown>) as unknown as TimeTabUIConfig;

@@ -252,6 +252,12 @@ interface ChartDisplayData {
   yAxisUnit: string | undefined;
   firstPayload: SeriesPayload | null;
   highchartsOptions: Record<string, unknown>;
+  // Advanced-settings styling (axis/grid/legend colors) as a standalone
+  // Highcharts-options fragment. `highchartsOptions` (normal mode) already has
+  // this merged in; shift/comparison modes build their own series and take this
+  // fragment separately so the same styling still applies. Undefined when
+  // advanced settings are off.
+  advancedChartOptions: Record<string, unknown> | undefined;
 }
 
 function buildChartDisplayData(
@@ -478,6 +484,35 @@ function buildChartDisplayData(
     };
   }
 
+  // Standalone advanced-styling fragment for the shift / comparison render
+  // paths, which build their own series and DON'T receive the full
+  // `highchartsOptions`. Mirrors the axis/grid/legend styling applied above so
+  // the Style-tab advanced settings take effect in every chart mode, not just
+  // normal mode. Uses a single yAxis object (shift/comparison are single-axis).
+  let advancedChartOptions: Record<string, unknown> | undefined;
+  if (advancedSettings?.enabled) {
+    const xText = chartColorFallback(advancedSettings.xAxisTextColor);
+    const xLine = chartColorFallback(advancedSettings.xAxisLineColor);
+    const yText = chartColorFallback(advancedSettings.yAxisTextColor);
+    const yLine = chartColorFallback(advancedSettings.yAxisLineColor);
+    const grid  = chartColorFallback(advancedSettings.gridLineColor);
+    const legend = chartColorFallback(advancedSettings.legendTextColor);
+    const advXAxis: Record<string, unknown> = {
+      ...(xText ? { labels: { style: { color: xText } } } : {}),
+      ...(xLine ? { lineColor: xLine, tickColor: xLine } : {}),
+    };
+    const advYAxis: Record<string, unknown> = {
+      ...(yText ? { labels: { style: { color: yText } } } : {}),
+      ...(yLine ? { lineColor: yLine, tickColor: yLine } : {}),
+      ...(grid  ? { gridLineColor: grid } : {}),
+    };
+    advancedChartOptions = {
+      ...(Object.keys(advXAxis).length ? { xAxis: advXAxis } : {}),
+      ...(Object.keys(advYAxis).length ? { yAxis: advYAxis } : {}),
+      ...(legend ? { legend: { itemStyle: { color: legend }, itemHoverStyle: { color: legend } } } : {}),
+    };
+  }
+
   const slotByCategory = new Map<string, { from: number; to: number }>();
   if (firstPayload) {
     firstPayload.slots.forEach((slot) => {
@@ -617,7 +652,7 @@ function buildChartDisplayData(
     },
   };
 
-  return { resolvedSeries, resolvedSeriesIds, categories, plotLines, plotBands, yAxisUnit, firstPayload, highchartsOptions };
+  return { resolvedSeries, resolvedSeriesIds, categories, plotLines, plotBands, yAxisUnit, firstPayload, highchartsOptions, advancedChartOptions };
 }
 
 // ── Mode payload helpers (mirror the LineChart widget) ──────────────────────────
@@ -979,6 +1014,14 @@ export function ColumnChart({ config = EMPTY_UI_CONFIG, data = [], onEvent, time
           '--cc-widget-title-font-size': `${advancedSettings.titleFontSize ?? 20}px`,
           '--cc-widget-title-color': advancedSettings.titleFontColor ?? 'var(--text-default-primary, #1a1a1a)',
           '--cc-widget-title-weight': String(fontWeightToCss(advancedSettings.titleFontWeight ?? 'Semi-Bold')),
+          // The design-sdk renders its own HTML legend (.fds-chart-legend__label)
+          // instead of the native Highcharts SVG legend, so highchartsOptions.
+          // legend.itemStyle never reaches it. Drive the legend text color via a
+          // CSS var + scoped override (see ColumnChart.css) — same pattern as the
+          // chart title above.
+          ...(chartColorFallback(advancedSettings.legendTextColor)
+            ? { '--cc-widget-legend-color': chartColorFallback(advancedSettings.legendTextColor) }
+            : {}),
         } as CSSProperties
       : {}),
     ...cardStyle,
@@ -1303,7 +1346,7 @@ export function ColumnChart({ config = EMPTY_UI_CONFIG, data = [], onEvent, time
     }
 
     const displayData = buildChartDisplayData(chart, ci, data, config);
-    const { resolvedSeries, categories, plotLines, plotBands, yAxisUnit, firstPayload, highchartsOptions } = displayData;
+    const { resolvedSeries, categories, plotLines, plotBands, yAxisUnit, firstPayload, highchartsOptions, advancedChartOptions } = displayData;
 
     function handlePointClick(ctx: { category: string }) {
       if (!timeDrillDown || !firstPayload) return;
@@ -1397,6 +1440,7 @@ export function ColumnChart({ config = EMPTY_UI_CONFIG, data = [], onEvent, time
             showDataLabels={showDataLabels}
             yAxisUnit={config.style.yAxisUnit || undefined}
             scrollable={scrollable}
+            {...(advancedChartOptions ? { highchartsOptions: advancedChartOptions } : {})}
           />
         ),
       };
@@ -1423,16 +1467,38 @@ export function ColumnChart({ config = EMPTY_UI_CONFIG, data = [], onEvent, time
       );
       if (longest.length > 0) {
         const catShifts = longest.map((sl) => sl.shift);
-        const catTimestamps = longest.map((sl) => ({ from: sl.from, to: sl.to }));
+        // Collapse the backend's per-(period × shift) slots down to ONE column
+        // category per periodicity bucket. In shift mode the backend splits each
+        // bucket (e.g. a day) into one slot per shift — all sharing the same
+        // `label` and emitted contiguously. Rendering those raw slots directly
+        // repeats the axis label ("25 Jun") once per shift; instead we group each
+        // contiguous run of identical labels into a single bucket and place every
+        // shift's value at that bucket index, so shifts render as grouped columns
+        // under one label (matching the design-sdk Shift example).
+        const bucketLabels: string[] = [];
+        const slotBucket: number[] = [];
+        longest.forEach((sl, k) => {
+          if (k === 0 || sl.label !== longest[k - 1].label) bucketLabels.push(sl.label);
+          slotBucket.push(bucketLabels.length - 1);
+        });
         const out: ShiftSeriesInput[] = [];
         resolved.forEach((r, si) => {
           const name = r.def.label || `Series ${si + 1}`;
-          const values = longest.map((_, k) => {
-            const v = r.payload?.slots[k]?.value;
-            return typeof v === 'number' ? v : null;
-          });
           cfgShifts.forEach((shift, shIdx) => {
             if (!enabledShiftIds.has(shift.id)) return;
+            const data: (number | null)[] = bucketLabels.map(() => null);
+            longest.forEach((sl, k) => {
+              const raw = r.payload?.slots[k]?.value;
+              const v = typeof raw === 'number' ? raw : null;
+              if (v === null) return;
+              const tag = catShifts[k];
+              // Prefer the backend's per-bucket shift tag (authoritative);
+              // fall back to a time-of-day window check.
+              const belongs = tag !== undefined && tag !== ''
+                ? tag === shift.name
+                : !!sl.from && isSlotInShift(sl.from, shift.startTime, shift.endTime, tz);
+              if (belongs) data[slotBucket[k]] = v;
+            });
             out.push({
               sourceId: r.def._id,
               sourceName: name,
@@ -1442,15 +1508,7 @@ export function ColumnChart({ config = EMPTY_UI_CONFIG, data = [], onEvent, time
               shiftIndex: shIdx,
               shiftColor: shift.color,
               seriesType: 'column',
-              data: values.map((v, k) => {
-                const tag = catShifts[k];
-                // Prefer the backend's per-bucket shift tag (authoritative).
-                if (tag !== undefined && tag !== '') return tag === shift.name ? v : null;
-                // Fallback: derive the shift from the bucket's time-of-day.
-                const ts = catTimestamps[k];
-                if (!ts?.from) return null;
-                return isSlotInShift(ts.from, shift.startTime, shift.endTime, tz) ? v : null;
-              }),
+              data,
             });
           });
         });
@@ -1476,13 +1534,14 @@ export function ColumnChart({ config = EMPTY_UI_CONFIG, data = [], onEvent, time
             children: (
               <ColumnChartDisplay
                 bare
-                categories={categories}
+                categories={bucketLabels}
                 shift={shiftProp}
                 stacked={(chart.stacks ?? []).length > 0 || config.style.stacked}
                 showLegend={false}
                 showDataLabels={showDataLabels}
                 yAxisUnit={config.style.yAxisUnit || undefined}
                 scrollable={scrollable}
+                {...(advancedChartOptions ? { highchartsOptions: advancedChartOptions } : {})}
               />
             ),
           };
