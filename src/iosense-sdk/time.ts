@@ -25,6 +25,18 @@ const MONTH_NAMES = [
   'July', 'August', 'September', 'October', 'November', 'December',
 ];
 
+// Cycle month = year boundary. The time-tab form stores it as a 1-based numeric
+// string ('4' = April, default '1' = January); the legacy GTP config stores it
+// as a month NAME ('April'). Normalize both to a 0-based month index so
+// `new Date(year, idx, …)` starts the year on the configured month.
+function cycleMonthIndex(month: string | undefined): number {
+  if (month == null || month === '') return 0;
+  const n = Number(month);
+  if (Number.isFinite(n) && n >= 1 && n <= 12) return n - 1;   // '4' → April (idx 3)
+  const byName = MONTH_NAMES.indexOf(month);
+  return byName >= 0 ? byName : 0;
+}
+
 function addPeriodToDate(d: Date, n: number, period: string): Date {
   const r = new Date(d);
   switch (period) {
@@ -68,9 +80,10 @@ function getPeriodAsPerCycle(period: string, event: string, cycleTime: CycleTime
       break;
     }
     case 'year': {
-      const selMonth = Math.max(0, MONTH_NAMES.indexOf(cycleTime.month ?? ''));
+      const selMonth = cycleMonthIndex(cycleTime.month);
       const selDate  = Number(cycleTime.date || 1);
       base = new Date(now.getFullYear(), selMonth, selDate, ch, cm, 0, 0);
+      if (now < base) base = addPeriodToDate(base, -1, 'year');
       break;
     }
     default:
@@ -84,7 +97,7 @@ function getPeriodAsPerCycle(period: string, event: string, cycleTime: CycleTime
 // Most-recent cycle boundary (<= now) for a calendar period, honoring cycleTime.
 // Falls back to calendar defaults (midnight / week-start Sunday / 1st) when no
 // cycleTime is configured.
-function cycleBoundary(period: 'day' | 'week' | 'month', cycleTime: CycleTime | undefined, now: Date): Date {
+function cycleBoundary(period: 'day' | 'week' | 'month' | 'year', cycleTime: CycleTime | undefined, now: Date): Date {
   const ch = Number(cycleTime?.hour   || 0);
   const cm = Number(cycleTime?.minute || 0);
   const y = now.getFullYear(), mo = now.getMonth(), d = now.getDate();
@@ -108,6 +121,13 @@ function cycleBoundary(period: 'day' | 'week' | 'month', cycleTime: CycleTime | 
       if (now < base) base = addPeriodToDate(base, -1, 'month');
       return base;
     }
+    case 'year': {
+      const selMonth = cycleMonthIndex(cycleTime?.month);
+      const selDate  = Number(cycleTime?.date || 1);
+      let base = new Date(y, selMonth, selDate, ch, cm, 0, 0);
+      if (now < base) base = addPeriodToDate(base, -1, 'year');
+      return base;
+    }
   }
 }
 
@@ -124,7 +144,8 @@ function resolveWindowInner(
     const dayStart   = cycleBoundary('day',   cycleTime, nowD).getTime();
     const weekStart  = cycleBoundary('week',  cycleTime, nowD).getTime();
     const monthStart = cycleBoundary('month', cycleTime, nowD).getTime();
-    const prev = (anchor: number, period: 'day' | 'week' | 'month') =>
+    const yearStart  = cycleBoundary('year',  cycleTime, nowD).getTime();
+    const prev = (anchor: number, period: 'day' | 'week' | 'month' | 'year') =>
       addPeriodToDate(new Date(anchor), -1, period).getTime();
     switch (dur.calendarType) {
       case 'today':          return { startTime: dayStart,                  endTime: ms };
@@ -133,6 +154,8 @@ function resolveWindowInner(
       case 'previous_week':  return { startTime: prev(weekStart, 'week'),   endTime: weekStart };
       case 'current_month':  return { startTime: monthStart,                endTime: ms };
       case 'previous_month': return { startTime: prev(monthStart, 'month'), endTime: monthStart };
+      case 'current_year':   return { startTime: yearStart,                 endTime: ms };
+      case 'previous_year':  return { startTime: prev(yearStart, 'year'),   endTime: yearStart };
     }
   }
 
