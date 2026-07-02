@@ -158,7 +158,13 @@ export type WidgetEvent =
       // refetches shift-bucketed data.
       shifts?: TimeShift[]; shiftAggregator?: string;
     } }
-  | { type: 'FILTER_CHANGE'; payload: Record<string, unknown> };
+  | { type: 'FILTER_CHANGE'; payload: Record<string, unknown> }
+  // Chart-control toggles from the settings menu (Clipping / Inexact Multiple).
+  // Emitted so the host can react to / persist the toggle state.
+  | { type: 'CHART_CONTROL_CHANGE'; payload: {
+      control: 'clipping' | 'inexactMultiple';
+      value: boolean;
+    } };
 
 // ---------------------------------------------------------------------------
 // ColumnChart — widget-specific types

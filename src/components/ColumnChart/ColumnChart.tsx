@@ -1209,6 +1209,18 @@ export function ColumnChart({ config = EMPTY_UI_CONFIG, data = [], onEvent, time
     onEvent({ type: 'TIME_CHANGE', payload });
   }
 
+  // Chart-control toggles (Clipping / Inexact Multiple) from the settings menu.
+  // Emitted so the host can react to / persist the toggle state.
+  function emitChartControlChange(
+    control: 'clipping' | 'inexactMultiple',
+    value: boolean,
+  ) {
+    const payload = { control, value };
+    // eslint-disable-next-line no-console
+    console.log('[ColumnChart] emitting CHART_CONTROL_CHANGE', payload);
+    onEvent({ type: 'CHART_CONTROL_CHANGE', payload });
+  }
+
   function handleRangeChange(r: DateRange | null) {
     // A preset selection fires onRangeChange too — handlePresetSelect already
     // applied the window, so skip (don't clobber the preset label / re-emit).
@@ -1702,9 +1714,9 @@ export function ColumnChart({ config = EMPTY_UI_CONFIG, data = [], onEvent, time
                   <ActionListItem contentType="SectionHeading" title="Chart Control" />
                   <ActionListItem title="Legends"          selectionType="Multiple" isSelected={showLegend}      onClick={() => setShowLegend((v) => !v)} />
                   <ActionListItem title="Data Labels"      selectionType="Multiple" isSelected={showDataLabels}  onClick={() => setShowDataLabels((v) => !v)} />
-                  <ActionListItem title="Clipping"         selectionType="Multiple" isSelected={clipping}        isDisabled={inexactMultiple} onClick={() => setClipping((v) => !v)} />
+                  <ActionListItem title="Clipping"         selectionType="Multiple" isSelected={clipping}        isDisabled={inexactMultiple} onClick={() => { const next = !clipping; setClipping(next); emitChartControlChange('clipping', next); }} />
                   <ActionListItem title="Scroll"           selectionType="Multiple" isSelected={scrollable}      onClick={() => setScrollable((v) => !v)} />
-                  <ActionListItem title="Inexact Multiple" selectionType="Multiple" isSelected={inexactMultiple} onClick={() => setInexactMultiple((v) => !v)} />
+                  <ActionListItem title="Inexact Multiple" selectionType="Multiple" isSelected={inexactMultiple} onClick={() => { const next = !inexactMultiple; setInexactMultiple(next); emitChartControlChange('inexactMultiple', next); }} />
                 </ActionListItemGroup>
               </DropdownMenu>
             </div>,
