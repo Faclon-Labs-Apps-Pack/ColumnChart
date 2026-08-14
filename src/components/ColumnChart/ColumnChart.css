@@ -126,6 +126,17 @@
   text-align: left;
 }
 
+/* Chart-title switcher dropdown (`.fds-chart__view-switcher-menu`) is portaled
+   to <body> and the SDK caps its wrapper at max-height: 600px — with many
+   charts that spills past the widget and overlaps neighbouring widgets. Cap the
+   wrapper to the pressed widget's usable height (published as --cc-view-menu-max-h
+   on <html> on mousedown; see ColumnChart.tsx). The SDK's own `__list` already
+   has overflow-y: auto + flex:1 1 auto, so it scrolls once the wrapper is
+   constrained — no other changes needed. */
+.fds-chart__view-switcher-menu .fds-dropdown-menu__wrapper {
+  max-height: var(--cc-view-menu-max-h, 320px);
+}
+
 .cc-widget {
   width: 100%;
   height: 100%;

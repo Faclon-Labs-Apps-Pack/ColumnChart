@@ -8,7 +8,8 @@ import { IconButton } from '@faclon-labs/design-sdk/IconButton';
 import { Modal, ModalHeader, ModalBody, ModalFooter } from '@faclon-labs/design-sdk/Modal';
 import { TimeTabConfiguration } from '@faclon-labs/design-sdk/TimeTabConfiguration';
 import type { TimeTabUIConfig, TimeTabConfigurationProps } from '@faclon-labs/design-sdk/TimeTabConfiguration';
-import { UNSPathInput } from '@faclon-labs/design-sdk/UNSPathInput';
+import { UNSTreePicker } from '@faclon-labs/design-sdk/UNSTreePicker';
+import type { UNSWorkspace, UNSNode } from '@faclon-labs/design-sdk/UNSTreePicker';
 import { SelectInput } from '@faclon-labs/design-sdk/SelectInput';
 import { DropdownMenu, ActionListItem, ActionListItemGroup } from '@faclon-labs/design-sdk/DropdownMenu';
 import { ColorInput } from '@faclon-labs/design-sdk/ColorPicker';
@@ -38,12 +39,12 @@ import {
   WidgetSizePreset,
   WidgetElementsConfig,
   WidgetAdvancedSettingsConfig,
+  WidgetControlDefaultsConfig,
   TimeConfig,
   Duration,
   BindingEntry,
 } from '../../iosense-sdk/types';
-import { useUNSTree } from '../../iosense-sdk/useUNSTree';
-import type { UNSTree } from '../../iosense-sdk/useUNSTree';
+import { useUNSTreePicker } from '../../iosense-sdk/useUNSTreePicker';
 import './ColumnChartConfiguration.css';
 
 interface ColumnChartConfigurationProps {
@@ -52,10 +53,13 @@ interface ColumnChartConfigurationProps {
   onChange: (config: ColumnChartEnvelope) => void;
   onBack?: () => void;
 
-  unsTree?: UNSTree;
-  isLoadingTree?: boolean;
-  onLoadWorkspaces?: () => void;
-  resolveUNSValue?: (rawValue: string) => string;
+  // --- Host-injectable UNS picker source (all-or-none) — UNSTreePicker's
+  // lazy contract. Replaces the old unsTree/onLoadWorkspaces/resolveUNSValue
+  // trio (UNSPathInput's static-tree model).
+  unsWorkspaces?: UNSWorkspace[];
+  isLoadingWorkspaces?: boolean;
+  loadUnsChildren?: (wsId: string, parentId?: string) => Promise<UNSNode[]>;
+  searchUnsNodes?: (wsId: string, query: string, limit?: number) => Promise<UNSNode[]>;
 
   // Registered global time pickers, injected by the host (Lens). Passed
   // straight through to design-sdk's TimeTabConfiguration so the user can
@@ -102,6 +106,16 @@ const DEFAULT_CARD_STYLE = {
   borderColor:     '#FFFFFF',
   borderWidth:     1,
   borderRadius:    4,
+};
+
+// Matches the widget's own hardcoded fallbacks (ColumnChart.tsx useState
+// defaults) so a widget saved before this section existed behaves
+// identically until a creator explicitly changes one of these.
+const DEFAULT_CONTROL_DEFAULTS: WidgetControlDefaultsConfig = {
+  timeDrilldown: true,
+  clipping: false,
+  scroll: false,
+  inexactMultiple: false,
 };
 
 // Older envelopes may have stored CSS custom-property strings (e.g.
@@ -301,6 +315,11 @@ function mapTimeTabToTimeConfig(ttc: TimeTabUIConfig): TimeConfig {
   const cmpScope: CmpScope | undefined =
     picker === 'fixed' ? cmpAny.fixed : picker === 'global' ? cmpAny.global : cmpAny;
 
+  // "Disable Periodicities" switch — local scopes it at the top level, fixed
+  // under `ttc.fixed`. When on, the widget hides its periodicity selector.
+  const disablePeriodicities =
+    picker === 'fixed' ? ttc.fixed?.disablePeriodicities : ttc.disablePeriodicities;
+
   return {
     timezone: ttc.timezone,
     // Engine still treats global like local (rolling) for data resolution,
@@ -313,6 +332,7 @@ function mapTimeTabToTimeConfig(ttc: TimeTabUIConfig): TimeConfig {
     fixedDuration,
     defaultDurationId: ttc.defaultDurationId,
     allDurations: (ttc.allDurations ?? []) as unknown as Duration[],
+    disablePeriodicities,
     // Fixed picker has its own single periodicity; otherwise use the tab default.
     defaultPeriodicity: (picker === 'fixed' && fd?.periodicity
       ? fd.periodicity.toLowerCase()
@@ -515,20 +535,20 @@ function makeEmptyChart(): ChartConfig {
 export function ColumnChartConfiguration(props: ColumnChartConfigurationProps) {
   const { config, authentication, onChange, onBack } = props;
 
+  // Host injects workspaces + loadChildren together; if it does, use those.
+  // Workspace loading is eager/automatic on both paths — the host's own
+  // service loads them before injection, and useUNSTreePicker's fallback
+  // fetches as soon as `authentication` is available — so there's no
+  // onOpen-style trigger to wire up here (unlike the old useUNSTree hook).
   const hasInjectedUNS =
-    props.unsTree !== undefined &&
-    props.onLoadWorkspaces !== undefined &&
-    props.resolveUNSValue !== undefined;
+    props.unsWorkspaces !== undefined &&
+    props.loadUnsChildren !== undefined;
 
-  const hookResult = useUNSTree(hasInjectedUNS ? undefined : authentication);
-  const unsTree         = hasInjectedUNS ? props.unsTree!              : hookResult.unsTree;
-  const isLoadingTree   = hasInjectedUNS ? (props.isLoadingTree ?? false) : hookResult.isLoadingTree;
-  const loadWorkspaces  = hasInjectedUNS ? props.onLoadWorkspaces!     : hookResult.loadWorkspaces;
-  const resolveUNSValue = hasInjectedUNS ? props.resolveUNSValue!      : hookResult.resolveUNSValue;
-
-  useEffect(() => {
-    if (authentication) loadWorkspaces();
-  }, [authentication]);
+  const hookResult = useUNSTreePicker(hasInjectedUNS ? undefined : authentication);
+  const unsWorkspaces       = hasInjectedUNS ? props.unsWorkspaces!               : hookResult.workspaces;
+  const isLoadingWorkspaces = hasInjectedUNS ? (props.isLoadingWorkspaces ?? false) : hookResult.isLoadingWorkspaces;
+  const loadUnsChildren     = hasInjectedUNS ? props.loadUnsChildren!             : hookResult.loadChildren;
+  const searchUnsNodes      = hasInjectedUNS ? (props.searchUnsNodes ?? hookResult.searchNodes) : hookResult.searchNodes;
 
   const [activeTab, setActiveTab] = useState<ActiveTab>('data');
 
@@ -593,6 +613,10 @@ export function ColumnChartConfiguration(props: ColumnChartConfigurationProps) {
   const [advancedTitleWeightOpen, setAdvancedTitleWeightOpen] = useState(false);
   const [advancedHeaderWeightOpen, setAdvancedHeaderWeightOpen] = useState(false);
   const [advancedBaseWeightOpen,   setAdvancedBaseWeightOpen]   = useState(false);
+  const [controlDefaults, setControlDefaults] = useState<WidgetControlDefaultsConfig>({
+    ...DEFAULT_CONTROL_DEFAULTS,
+    ...(config?.uiConfig?.style?.controlDefaults ?? {}),
+  });
 
   // ── Modal state ───────────────────────────────────────────────────────────
   const configRef = useRef<HTMLDivElement>(null);
@@ -695,6 +719,10 @@ export function ColumnChartConfiguration(props: ColumnChartConfigurationProps) {
         ...sanitizeAdvancedSettings(config.uiConfig?.style?.advancedSettings ?? {}),
       });
       setAdvancedTitleWeightOpen(false);
+      setControlDefaults({
+        ...DEFAULT_CONTROL_DEFAULTS,
+        ...(config.uiConfig?.style?.controlDefaults ?? {}),
+      });
       setCurrentTimeConfig(config.timeConfig);
       setCurrentTimeTabConfig(config.timeTabConfig);
     }
@@ -720,46 +748,100 @@ export function ColumnChartConfiguration(props: ColumnChartConfigurationProps) {
   // modal's document-level outside-pointer-down listener then treats a click on a
   // dropdown option / color swatch / color canvas as a click outside the modal and
   // dismisses the whole modal — so the user can never pick an hour or a color.
-  // (Worked in 0.7.3, where these popovers stayed within the modal.)
+  // (Worked in 0.7.3, where these popovers stayed within the modal.) Same
+  // regression hits `.fds-uns-tree-picker__popover` (UNSTreePicker, migrated off
+  // UNSPathInput) and `.fds-dropdown-menu` (the TimeTab's "Add/Edit Duration"
+  // side panel's Periodicities field — per the SDK's own TimeTabConfiguration
+  // guard docs, its outside-click dismissal only special-cases ListCard clicks,
+  // nothing exempts its own Periodicities dropdown).
   //
-  // Fix: attach a BUBBLE-phase stopPropagation boundary on each popover element as
-  // it is portaled in. The popover's own handlers (option select, color drag,
-  // sliders) run first during the target/bubble phase; the event is then stopped
-  // at the popover boundary before it can bubble up to the modal's document-level
-  // listener. This keeps the modal open WITHOUT breaking any in-popover interaction
-  // (unlike a document-capture guard, which would swallow the color canvas's own
-  // pointerdown). A MutationObserver wires up popovers created after mount.
-  // Remove once the SDK ships a fix.
+  // ORIGINAL FIX (find each popover element via MutationObserver, attach a
+  // stopPropagation listener directly to it) worked for the first two cases but
+  // NEVER fires for `.fds-dropdown-menu` — confirmed via diagnostic logging that
+  // `document.querySelectorAll`/a `document.body`-scoped MutationObserver never
+  // finds it, despite DevTools confirming the exact class exists with no iframe
+  // boundary involved. Root cause undetermined; rather than keep chasing it,
+  // this uses a strategy that doesn't require ever finding/attaching to the
+  // popover element at all.
+  //
+  // CURRENT FIX: a single BUBBLE-phase (NOT capture) listener on `document`
+  // inspects `event.composedPath()` — the event's actual full ancestor chain,
+  // always accurate regardless of portals/custom containers/whatever was
+  // defeating element discovery above — and stops propagation the instant any
+  // ancestor matches a popover selector. Deliberately bubble phase: a capture
+  // phase listener on `document` would stop the event BEFORE it ever reaches
+  // its real target (capture travels document → target), silently swallowing
+  // the popover's own mousedown/pointerdown — exactly the regression the
+  // original comment above warns a "document-capture guard" would cause
+  // (it would break the color canvas's drag-to-pick, which needs its own
+  // pointerdown to start tracking). Bubble phase runs AFTER the target has
+  // already fully received and processed the event, so nothing in the
+  // popover ever loses its own interaction — we only intercept once it
+  // bubbles back up to `document`.
+  //
+  // This still pre-empts the SDK's own outside-click check (also a
+  // bubble-phase `document.addEventListener('mousedown', ...)`, per
+  // useClickOutside.js) because same-node same-phase listeners fire in
+  // REGISTRATION ORDER, and this effect (mounted once, with the whole
+  // ColumnChartConfiguration component, before the user can open any modal)
+  // always registers before any modal's own listener does.
+  //
+  // UPDATE (confirmed via diagnostic logging): for the "Add/Edit Duration"
+  // panel's Periodicities field specifically, `stopPropagation()` alone
+  // wasn't enough — the panel doesn't dismiss via a mousedown "outside
+  // click" listener at all, it dismisses via a FOCUS TRAP (blur/focusout).
+  // A mousedown on a focusable element's browser-native DEFAULT ACTION is
+  // what shifts `document.activeElement` to it — that happens independently
+  // of our JS event propagation, so stopping propagation doesn't stop it.
+  // Since the clicked option lives in a portal outside the panel's DOM,
+  // focus visibly "escapes" the panel's boundary the instant the browser
+  // processes that default action, and the panel's focus trap closes it —
+  // all before `click` (and the actual selection) ever fires. `preventDefault()`
+  // suppresses that native focus-shift so the field stays focused throughout;
+  // `click` still fires completely normally afterward (unaffected by a
+  // preceding mousedown's preventDefault), so selection keeps working.
   useEffect(() => {
-    const SELECTORS = ['.fds-select-input__popover', '.fds-color-input__popover'];
-    // Stop ONLY the pointer-DOWN events. The modal's outside-click detection
-    // fires on pointerdown/mousedown, so blocking those at the popover boundary
-    // keeps it open. `click` (and pointer/mouse-up) are deliberately left alone —
-    // option selection and color-swatch application dispatch on `click`, which
-    // must still reach the SDK's delegated handler, or picking a value silently
-    // no-ops while the modal stays open.
+    const SELECTORS = ['.fds-select-input__popover', '.fds-color-input__popover', '.fds-uns-tree-picker__popover', '.fds-dropdown-menu'];
     const EVENTS: Array<keyof DocumentEventMap> = ['pointerdown', 'mousedown'];
-    const stop = (e: Event) => e.stopPropagation();
-    const attach = (el: Element) => {
-      if ((el as { __ccPopoverGuard?: boolean }).__ccPopoverGuard) return;
-      (el as { __ccPopoverGuard?: boolean }).__ccPopoverGuard = true;
-      EVENTS.forEach((ev) => el.addEventListener(ev, stop));
-    };
-    const scan = (root: ParentNode) =>
-      SELECTORS.forEach((sel) => root.querySelectorAll?.(sel).forEach(attach));
-    scan(document);
-    const obs = new MutationObserver((muts) => {
-      muts.forEach((m) =>
-        m.addedNodes.forEach((n) => {
-          if (n.nodeType !== 1) return;
-          const el = n as Element;
-          if (SELECTORS.some((sel) => el.matches?.(sel))) attach(el);
-          scan(el);
-        }),
+    const guard = (e: Event) => {
+      const path = (e as { composedPath?: () => EventTarget[] }).composedPath?.() ?? [];
+      const matched = path.find(
+        (n): n is Element => n instanceof Element && SELECTORS.some((sel) => n.matches(sel)),
       );
-    });
-    obs.observe(document.body, { childList: true, subtree: true });
-    return () => obs.disconnect();
+      if (matched) {
+        // eslint-disable-next-line no-console
+        console.error(`[cc-popover-guard] blocked ${e.type} — path included ${matched.tagName}.${matched.className}`);
+        e.stopPropagation();
+        if (e.cancelable) e.preventDefault();
+      }
+    };
+    EVENTS.forEach((ev) => document.addEventListener(ev, guard));
+    return () => EVENTS.forEach((ev) => document.removeEventListener(ev, guard));
+  }, []);
+
+  // TEMP DIAGNOSTIC: the guard above is confirmed to block BOTH pointerdown
+  // and mousedown from ever reaching document (console-verified), yet the
+  // Add/Edit Duration panel still closes when a Periodicity option is
+  // clicked — proving the dismissal isn't mousedown/pointerdown-based at
+  // all. This purely OBSERVES (never intercepts) click/focus events to find
+  // out what actually correlates with the close. Remove once identified.
+  useEffect(() => {
+    const SELECTORS = ['.fds-select-input__popover', '.fds-color-input__popover', '.fds-uns-tree-picker__popover', '.fds-dropdown-menu'];
+    const describe = (e: Event) => {
+      const t = e.target as Element | null;
+      const path = (e as { composedPath?: () => EventTarget[] }).composedPath?.() ?? [];
+      const inPopover = path.some((n) => n instanceof Element && SELECTORS.some((sel) => n.matches(sel)));
+      return `type=${e.type} target=${t?.tagName}.${t?.className} inPopoverPath=${inPopover}`;
+    };
+    const log = (e: Event) => {
+      // eslint-disable-next-line no-console
+      console.error(`[cc-popover-watch] ${describe(e)}`);
+    };
+    const EVENTS: Array<keyof DocumentEventMap> = ['click', 'focusin', 'focusout', 'blur'];
+    // Capture phase here is fine — we only read/log, never call
+    // stopPropagation, so nothing about the page's real behavior changes.
+    EVENTS.forEach((ev) => document.addEventListener(ev, log, true));
+    return () => EVENTS.forEach((ev) => document.removeEventListener(ev, log, true));
   }, []);
 
   // ── Builders ──────────────────────────────────────────────────────────────
@@ -781,6 +863,7 @@ export function ColumnChartConfiguration(props: ColumnChartConfigurationProps) {
     widgetSize?: WidgetSizeConfig;
     widgetElements?: WidgetElementsConfig;
     advancedSettings?: WidgetAdvancedSettingsConfig;
+    controlDefaults?: WidgetControlDefaultsConfig;
   }): ColumnChartUIConfig {
     const nextCharts = overrides.charts ?? chartsList;
     const nextActiveId = overrides.activeChartId ?? selectedChartId;
@@ -816,6 +899,7 @@ export function ColumnChartConfiguration(props: ColumnChartConfigurationProps) {
           hideChartTitle,
         },
         advancedSettings: overrides.advancedSettings ?? advancedSettings,
+        controlDefaults: overrides.controlDefaults ?? controlDefaults,
       },
     };
   }
@@ -937,6 +1021,15 @@ export function ColumnChartConfiguration(props: ColumnChartConfigurationProps) {
     };
     setAdvancedSettings(next);
     emit({ advancedSettings: next });
+  }
+
+  function updateControlDefaults(patch: Partial<WidgetControlDefaultsConfig>) {
+    const next = {
+      ...controlDefaults,
+      ...patch,
+    };
+    setControlDefaults(next);
+    emit({ controlDefaults: next });
   }
 
   function emit(
@@ -1388,6 +1481,18 @@ export function ColumnChartConfiguration(props: ColumnChartConfigurationProps) {
     const tc     = mapTimeTabToTimeConfig(ttc);
     logTimeConfig(ttc, tc);
     const ttcRaw = ttc as unknown as Record<string, unknown>;
+
+    // Strip the stale `global` scope when the widget is no longer linked to a
+    // Global Time Picker. The SDK persists the linked-GTP reference under
+    // `timeTabConfig.global`; if the user switches `linkTimeWith` back to
+    // 'local' (or 'fixed'), leaving that key behind makes the host keep wiring
+    // the widget to the GTP — so it keeps following global time even though the
+    // picker mode says otherwise. Removing the key when the active picker isn't
+    // 'global' severs that link cleanly.
+    const activePicker = (ttcRaw.linkTimeWith ?? ttcRaw.timeType ?? 'local') as string;
+    if (activePicker !== 'global') {
+      delete ttcRaw.global;
+    }
     setCurrentTimeConfig(tc);
     setCurrentTimeTabConfig(ttcRaw);
     emit({}, { timeConfig: tc, timeTabConfig: ttcRaw });
@@ -1933,6 +2038,56 @@ export function ColumnChartConfiguration(props: ColumnChartConfigurationProps) {
 
             <div className="cc-config__style-divider" />
 
+            {/* Default state for the widget's own settings-menu (gear icon)
+                toggles — everything there EXCEPT Legends/Data Labels, which
+                already persist above via Hide Widget Elements. These four
+                were previously hardcoded client-side state with no saved
+                default at all. */}
+            <div className="cc-config__style-block cc-config__control-defaults-section">
+              <p className="BodySmallSemibold cc-config__style-section-heading">Default Chart Controls</p>
+              <div className="cc-config__field-row">
+                <span className="BodySmallRegular cc-config__field-label">Time Drilldown</span>
+                <Switch
+                  accessibilityLabel="Time Drilldown"
+                  isChecked={controlDefaults.timeDrilldown}
+                  onChange={({ isChecked }) => updateControlDefaults({ timeDrilldown: isChecked })}
+                />
+              </div>
+              <div className="cc-config__field-row">
+                <span className="BodySmallRegular cc-config__field-label">Clipping</span>
+                <Switch
+                  accessibilityLabel="Clipping"
+                  isChecked={controlDefaults.clipping}
+                  isDisabled={controlDefaults.inexactMultiple}
+                  onChange={({ isChecked }) => updateControlDefaults({ clipping: isChecked })}
+                />
+              </div>
+              <div className="cc-config__field-row">
+                <span className="BodySmallRegular cc-config__field-label">Scroll</span>
+                <Switch
+                  accessibilityLabel="Scroll"
+                  isChecked={controlDefaults.scroll}
+                  onChange={({ isChecked }) => updateControlDefaults({ scroll: isChecked })}
+                />
+              </div>
+              <div className="cc-config__field-row">
+                <span className="BodySmallRegular cc-config__field-label">Inexact Multiple</span>
+                <Switch
+                  accessibilityLabel="Inexact Multiple"
+                  isChecked={controlDefaults.inexactMultiple}
+                  onChange={({ isChecked }) => updateControlDefaults({ inexactMultiple: isChecked })}
+                />
+              </div>
+              {controlDefaults.inexactMultiple && (
+                <p className="cc-config__empty-hint BodySmallRegular cc-config__axis-hint">
+                  <Info size={16} />
+                  <span>The current, still-in-progress period is broken into finer sub-buckets by the backend — this can cascade through multiple levels (e.g. week/day/hour) depending on how close to a period boundary the load happens.</span>
+                </p>
+              )}
+            </div>
+
+            <div className="cc-config__style-divider" />
+
             <div className="cc-config__style-block cc-config__advanced-section">
               <div className="cc-config__field-row">
                 <span className="BodySmallSemibold cc-config__style-section-heading">Advanced Settings</span>
@@ -2175,15 +2330,16 @@ export function ColumnChartConfiguration(props: ColumnChartConfigurationProps) {
                   <InputFieldHeader label="Color" necessityIndicator="required" />
                   <HexInput value={formColor} onChange={(v) => setFormColor(v)} />
                 </div>
-                <UNSPathInput
+                <UNSTreePicker
                   label="UNS Path"
                   necessityIndicator="required"
-                  placeholder="Type / to browse UNS or paste {{topic}}"
+                  placeholder="Click to browse UNS or paste {{topic}}"
                   value={formUnsPath}
-                  tree={unsTree}
-                  isLoading={isLoadingTree}
-                  onChange={(v: string) => setFormUnsPath(resolveUNSValue(v))}
-                  onOpen={() => loadWorkspaces()}
+                  workspaces={unsWorkspaces}
+                  isLoadingWorkspaces={isLoadingWorkspaces}
+                  loadChildren={loadUnsChildren}
+                  searchNodes={searchUnsNodes}
+                  onChange={(v: string) => setFormUnsPath(v)}
                 />
                 {modalSection === 'series' && (
                   <div className="cc-series-modal__two-col">
@@ -2197,8 +2353,24 @@ export function ColumnChartConfiguration(props: ColumnChartConfigurationProps) {
               <>
                 {/* 1. Identity */}
                 <TextInput label="Label" necessityIndicator="required" isRequired placeholder="e.g. Target" value={formLabel} onChange={({ value }) => setFormLabel(value)} />
-                {/* 2. Data */}
-                <UNSPathInput label="Value" placeholder="Type a number or / to bind" value={formValue} tree={unsTree} isLoading={isLoadingTree} onChange={(v: string) => setFormValue(resolveUNSValue(v))} onOpen={() => loadWorkspaces()} />
+                {/* 2. Data — design-sdk 0.7.17 restored dual-mode entry natively
+                    via `allowFreeValue`: type a number directly, or type a
+                    leading `/` to flip into the UNS picker. Replaces the
+                    Static/UNS Bind radio toggle this used before that prop
+                    existed — the picker itself now handles both cases in one
+                    field, matching the deprecated UNSPathInput's original
+                    behavior. */}
+                <UNSTreePicker
+                  label="Value"
+                  placeholder="Type a number or / to bind"
+                  value={formValue}
+                  allowFreeValue
+                  workspaces={unsWorkspaces}
+                  isLoadingWorkspaces={isLoadingWorkspaces}
+                  loadChildren={loadUnsChildren}
+                  searchNodes={searchUnsNodes}
+                  onChange={(v: string) => setFormValue(v)}
+                />
                 {/* 3. Color */}
                 <div>
                   <InputFieldHeader label="Color" necessityIndicator="required" />
@@ -2315,8 +2487,13 @@ export function ColumnChartConfiguration(props: ColumnChartConfigurationProps) {
                   <HexInput value={formColor} onChange={(v) => setFormColor(v)} />
                 </div>
                 <div className="cc-series-modal__two-col">
-                  <UNSPathInput label="Start value" necessityIndicator="required" isRequired placeholder="Start value" value={formFrom} tree={unsTree} isLoading={isLoadingTree} onChange={(v: string) => setFormFrom(resolveUNSValue(v))} onOpen={() => loadWorkspaces()} />
-                  <UNSPathInput label="End value"   necessityIndicator="required" isRequired placeholder="End value"   value={formTo}   tree={unsTree} isLoading={isLoadingTree} onChange={(v: string) => setFormTo(resolveUNSValue(v))}   onOpen={() => loadWorkspaces()} />
+                  {/* allowFreeValue (design-sdk 0.7.17): type a number or / to
+                      bind, same as Plot Line's Value field — these carry the
+                      same number-or-binding data model (see save-time
+                      VARIABLE_REGEX coercion below) but never had free-value
+                      entry restored until now. */}
+                  <UNSTreePicker label="Start value" necessityIndicator="required" isRequired placeholder="Value or / to bind" value={formFrom} allowFreeValue workspaces={unsWorkspaces} isLoadingWorkspaces={isLoadingWorkspaces} loadChildren={loadUnsChildren} searchNodes={searchUnsNodes} onChange={(v: string) => setFormFrom(v)} />
+                  <UNSTreePicker label="End value"   necessityIndicator="required" isRequired placeholder="Value or / to bind" value={formTo}   allowFreeValue workspaces={unsWorkspaces} isLoadingWorkspaces={isLoadingWorkspaces} loadChildren={loadUnsChildren} searchNodes={searchUnsNodes} onChange={(v: string) => setFormTo(v)} />
                 </div>
                 {/* Axis — only when a Right axis exists */}
                 {(chartsList.find((c) => c._id === modalChartId)?.axes ?? []).some((a) => a.yAxis === 1) && (

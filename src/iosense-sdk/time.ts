@@ -20,6 +20,18 @@ const PERIOD_MS: Record<string, number> = {
   week: 7 * 86_400_000, month: 30 * 86_400_000, year: 365 * 86_400_000,
 };
 
+// Calendar defaults (midnight, Sunday, 1st, January) — the reference to diff
+// against when deciding whether a widget's ACTUAL cycle time changes the
+// resolved window at all. Deliberately NOT `undefined`: `getPeriodAsPerCycle`
+// (case 2, below) short-circuits to "now" whenever `cycleTime` is missing,
+// which is not a calendar boundary at all — comparing against that would look
+// divergent for virtually every boundary-based duration regardless of
+// whether cycle time actually matters, over-firing the cycle-time correction
+// everywhere instead of only where it's needed.
+export const CALENDAR_DEFAULT_CYCLE_TIME: CycleTime = {
+  hour: '00', minute: '00', dayOfWeek: 0, date: '1',
+};
+
 const MONTH_NAMES = [
   'January', 'February', 'March', 'April', 'May', 'June',
   'July', 'August', 'September', 'October', 'November', 'December',
@@ -159,8 +171,20 @@ function resolveWindowInner(
     }
   }
 
-  // 2. Custom presets — navigation + cycle-time boundaries.
-  if (dur.navigation) {
+  // 2. Custom presets — navigation + cycle-time boundaries. Takes this branch
+  // whenever the duration expresses itself via boundary events (xEvent/yEvent
+  // = 'Start'/'End'), not only when `navigation` (a Previous/Next direction)
+  // is set. This matters for the Fixed time picker's "Set Duration" form
+  // (GTPFixedDuration): it has no `calendarType` field at all — a "current
+  // period" duration like Financial Year is necessarily expressed as
+  // xEvent='Start' with x=0, not via a Previous/Next direction — but
+  // `navigation` is a required string on that shape and the SDK leaves it ''
+  // when there's no direction to pick. Gating on `dur.navigation` alone made
+  // that empty string fall through to the rolling branch below, which
+  // ignores cycleTime entirely — exactly why Fixed-picker widgets kept
+  // resolving Jan…now instead of the configured Apr…now.
+  const hasBoundaryEvent = (e?: string) => e === 'Start' || e === 'End';
+  if (dur.navigation || hasBoundaryEvent(dur.xEvent) || hasBoundaryEvent(dur.yEvent)) {
     const xPeriod = dur.xPeriod ?? 'day';
     const yPeriod = dur.yPeriod ?? 'day';
     const xEvent  = dur.xEvent  ?? 'Start';

@@ -203,7 +203,7 @@
    around the cards. Drop the SDK's padding so the configurator section is
    the only source of spacing inside every accordion body. */
 .cc-config .fds-pa-item__body-inner {
-  padding: 0;
+  /* padding: 0; */
   gap: 0;
 }
 
@@ -391,15 +391,15 @@
   gap: var(--spacing-03, 8px);
 }
 
-/* SelectInput / UNSPathInput / DropdownMenu portals must layer above the
+/* SelectInput / UNSTreePicker / DropdownMenu portals must layer above the
    modal's own stacking context — otherwise they're clipped behind the modal
    shell when opened from inside it. */
 .fds-modal__backdrop .fds-select-input__popover,
-.fds-modal__backdrop .fds-uns-path-input__popover,
+.fds-modal__backdrop .fds-uns-tree-picker__popover,
 .fds-modal__backdrop .fds-dropdown-menu {
   z-index: var(--global-z-index-modal, 500);
 }
-.fds-uns-path-input__popover {
+.fds-uns-tree-picker__popover {
   z-index: 9999 !important;
 }
 
@@ -457,6 +457,6 @@
 /* The UNS dropdown renders via createPortal at document.body with z-index 100
    (--global-z-index-dropdown). The modal backdrop sits at z-index 300
    (--global-z-index-overlay). Force the dropdown above the modal. */
-.fds-uns-path-input__popover {
+.fds-uns-tree-picker__popover {
   z-index: 500 !important;
 }

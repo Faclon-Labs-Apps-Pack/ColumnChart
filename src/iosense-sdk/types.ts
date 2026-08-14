@@ -129,6 +129,11 @@ export interface TimeConfig {
   defaultDurationId: string;
   allDurations: Duration[];
   defaultPeriodicity: 'minute' | 'hourly' | 'daily' | 'weekly' | 'monthly' | 'quarterly';
+  /** When true, the widget hides its periodicity selector — the user can't
+   *  change periodicity and the configured `defaultPeriodicity` is used as-is.
+   *  Mirrors the time tab's "Disable Periodicities" switch (local: top-level,
+   *  fixed: `fixed.disablePeriodicities`). */
+  disablePeriodicities?: boolean;
   /** Shifts configured in the time tab — non-empty enables the DatePicker's
    *  Shift toggle (auto-discovered via ChartTimeProvider). */
   shifts?: TimeShift[];
@@ -245,6 +250,20 @@ export interface WidgetElementsConfig {
   hideInfoIcon?: boolean;
 }
 
+// Defaults for the widget's own settings-menu (gear icon) toggles that were
+// previously hardcoded client-side state with no persisted default —
+// Legends/Data Labels are deliberately NOT here; those already persist via
+// WidgetElementsConfig (Hide Widget Elements). Clipping/Inexact Multiple also
+// ride on TIME_CHANGE, so a non-off default needs one bootstrap emit on load
+// (see the widget's ensureControlDefaults) — there's no passive channel to
+// tell the host about them otherwise.
+export interface WidgetControlDefaultsConfig {
+  timeDrilldown: boolean;
+  clipping: boolean;
+  scroll: boolean;
+  inexactMultiple: boolean;
+}
+
 export type WidgetFontWeight = 'Regular' | 'Medium' | 'Semi-Bold' | 'Bold';
 
 export interface WidgetAdvancedSettingsConfig {
@@ -302,6 +321,7 @@ export interface ColumnChartUIConfig {
     widgetSize?: WidgetSizeConfig;
     widgetElements?: WidgetElementsConfig;
     advancedSettings?: WidgetAdvancedSettingsConfig;
+    controlDefaults?: WidgetControlDefaultsConfig;
   };
 }
 

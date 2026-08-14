@@ -1,6 +1,6 @@
 # IOsense Widget — Architecture Rules
 
-Read the four skill files below **before touching any widget code**. They are the source of truth.
+Read the skill files below **before touching any widget code**. They are the source of truth.
 
 | Skill file | What it covers |
 |---|---|
@@ -8,6 +8,8 @@ Read the four skill files below **before touching any widget code**. They are th
 | `.claude/skills/Bindable.md` | How `{{topic}}` bindings work, `buildDynamicBindingPathList` implementation |
 | `.claude/skills/MiniEngine.md` | `resolve()` data pipeline, `resolveAndCompute` API, DataEntry contract |
 | `.claude/skills/DevHarness.md` | `App.tsx` wiring, auth flow, console logs to expect |
+| `.claude/skills/ConfigLayout.md` | **Configurator look & behavior contract** — panel shell, header/back button, tabs, section/accordion layout, side-panel + delete-confirm modals, spacing tokens, form control catalog, entity state machine, null-safety strategy. Mandatory for every configurator; portable to new widgets |
+| `.claude/skills/EntitySettings.md` | **Entity Settings state machine** — the "Chart Settings"-style block: Empty/View/Edit modes, pending/draft buffers, single emit funnel, load/migration effects, full edge-case list. Use whenever a configurator manages a list of named top-level entities |
 
 ---
 
@@ -122,64 +124,104 @@ import { Button } from '@faclon-labs/design-sdk/Button';
 
 Use this pattern in **every configurator** that has bindable fields. No need to re-explain it — follow this recipe exactly.
 
-Angular injects `unsTree`, `onLoadWorkspaces`, and `resolveUNSValue` at runtime. The dev harness falls back to the `useUNSTree` hook. The configurator must support both paths.
+Uses `@faclon-labs/design-sdk/UNSTreePicker` (requires design-sdk **≥ 0.7.16**) — the lazy,
+workspace-scoped picker. **`UNSPathInput` (static fully-materialized `tree`) is deprecated — do
+not use it in new or migrated code.** Angular injects `unsWorkspaces`, `isLoadingWorkspaces`,
+`loadUnsChildren`, and `searchUnsNodes` at runtime. The dev harness falls back to the
+`useUNSTreePicker` hook. The configurator must support both paths.
 
 ### 1. Props interface additions
 
 ```tsx
-// All-or-none: Angular injects all three or none
-unsTree?: UNSTree;
-isLoadingTree?: boolean;
-onLoadWorkspaces?: () => void;
-resolveUNSValue?: (rawValue: string) => string;
+// All-or-none: Angular injects all four (searchUnsNodes may be omitted to hide search)
+unsWorkspaces?: UNSWorkspace[];
+isLoadingWorkspaces?: boolean;
+loadUnsChildren?: (wsId: string, parentId?: string) => Promise<UNSNode[]>;
+searchUnsNodes?: (wsId: string, query: string, limit?: number) => Promise<UNSNode[]>;
 ```
 
 ### 2. Injection detection + hook wiring
 
-Add inside the component, before `return`. The hook is always called (Rules of Hooks).
+Add inside the component, before `return`. The hook is always called (Rules of Hooks). Only
+`unsWorkspaces` + `loadUnsChildren` gate injection — `isLoadingWorkspaces`/`searchUnsNodes` are
+optional on both paths (workspace loading is eager/automatic on both — there's no `onOpen`-style
+trigger to wire up, unlike the old `UNSPathInput` pattern).
 
 ```tsx
 const hasInjectedUNS =
-  props.unsTree !== undefined &&
-  props.onLoadWorkspaces !== undefined &&
-  props.resolveUNSValue !== undefined;
+  props.unsWorkspaces !== undefined &&
+  props.loadUnsChildren !== undefined;
 
-const hookResult = useUNSTree(hasInjectedUNS ? undefined : authentication);
-const unsTree         = hasInjectedUNS ? props.unsTree!              : hookResult.unsTree;
-const isLoadingTree   = hasInjectedUNS ? (props.isLoadingTree ?? false) : hookResult.isLoadingTree;
-const loadWorkspaces  = hasInjectedUNS ? props.onLoadWorkspaces!     : hookResult.loadWorkspaces;
-const resolveUNSValue = hasInjectedUNS ? props.resolveUNSValue!      : hookResult.resolveUNSValue;
+const hookResult = useUNSTreePicker(hasInjectedUNS ? undefined : authentication);
+const unsWorkspaces       = hasInjectedUNS ? props.unsWorkspaces!               : hookResult.workspaces;
+const isLoadingWorkspaces = hasInjectedUNS ? (props.isLoadingWorkspaces ?? false) : hookResult.isLoadingWorkspaces;
+const loadUnsChildren     = hasInjectedUNS ? props.loadUnsChildren!             : hookResult.loadChildren;
+const searchUnsNodes      = hasInjectedUNS ? (props.searchUnsNodes ?? hookResult.searchNodes) : hookResult.searchNodes;
 ```
 
-### 3. UNSPathInput for every bindable field
+### 3. UNSTreePicker for every bindable field
 
-Replace any raw `<input>` on a bindable field with:
+Replace any raw `<input>` (or old `UNSPathInput`) on a bindable field with:
 
 ```tsx
-<UNSPathInput
+<UNSTreePicker
   label="..."
-  placeholder="Type / to browse UNS or paste {{topic}} directly"
+  placeholder="Click to browse UNS or paste {{topic}} directly"
   value={myField}
-  tree={unsTree}
-  isLoading={isLoadingTree}
+  workspaces={unsWorkspaces}
+  isLoadingWorkspaces={isLoadingWorkspaces}
+  loadChildren={loadUnsChildren}
+  searchNodes={searchUnsNodes}
   onChange={(v: string) => {
-    const r = resolveUNSValue(v);
-    setMyField(r);
-    emit({ myField: r });
+    setMyField(v);
+    emit({ myField: v });
   }}
-  onOpen={() => loadWorkspaces()}
 />
 ```
+
+**No `resolveUNSValue` step.** `onChange` emits the final `{{uns:wsId://path}}` topic directly —
+save it straight to config.
+
+### 3a. Dual-mode fields (static value OR a UNS binding) — `allowFreeValue`
+
+Some fields (a plot-line's Value, a plot-band's Start/End) accept **either** a literal number
+**or** a bound topic — never a raw `<input>` fallback and never a manual Static/UNS-Bind radio
+toggle. Requires design-sdk **≥ 0.7.17**. Add `allowFreeValue` and update the placeholder:
+
+```tsx
+<UNSTreePicker
+  label="Value"
+  placeholder="Type a number or / to bind"
+  value={myField}
+  allowFreeValue
+  workspaces={unsWorkspaces}
+  isLoadingWorkspaces={isLoadingWorkspaces}
+  loadChildren={loadUnsChildren}
+  searchNodes={searchUnsNodes}
+  onChange={(v: string) => setMyField(v)}
+/>
+```
+
+Typing a leading `/` flips the field into the UNS picker; otherwise the typed text commits as a
+plain string. `onChange`'s `meta.type` is `'selected'` (topic), `'value'` (free text), or
+`'cleared'` — or just check `isTopic(value)` (also exported from
+`@faclon-labs/design-sdk/UNSTreePicker`) at save time, same as the existing `VARIABLE_REGEX`
+`{{...}}` check this repo already uses for bindable-field detection. **Never build a Static/UNS
+toggle (RadioGroup + swapping between `TextInput`/`UNSTreePicker`) for this — `allowFreeValue`
+replaced that need entirely.**
 
 ### 4. Imports
 
 ```tsx
-import { useUNSTree, UNSTree } from '../../iosense-sdk/useUNSTree';
-import { UNSPathInput } from '@faclon-labs/design-sdk/UNSPathInput';
+import { useUNSTreePicker } from '../../iosense-sdk/useUNSTreePicker';
+import { UNSTreePicker } from '@faclon-labs/design-sdk/UNSTreePicker';
+import type { UNSWorkspace, UNSNode } from '@faclon-labs/design-sdk/UNSTreePicker';
 ```
 
 ### Rules
 
-- `useUNSTree` is always called unconditionally — pass `undefined` as auth when injection is active.
-- Never pass `unsTree` / `onLoadWorkspaces` / `resolveUNSValue` down to the widget renderer — configurator-only.
-- Every bindable field must use `UNSPathInput`, not a raw `<input>`.
+- `useUNSTreePicker` is always called unconditionally — pass `undefined` as auth when injection is active.
+- Never pass `unsWorkspaces` / `loadUnsChildren` / `searchUnsNodes` down to the widget renderer — configurator-only.
+- Every bindable field must use `UNSTreePicker`, not a raw `<input>` or the deprecated `UNSPathInput`.
+- **z-index gotcha:** the picker's dropdown portals to `<body>` at `--global-z-index-popover` (500). If it opens inside a modal with a higher z-index, add `.fds-uns-tree-picker__popover` to that modal's popover z-index override — otherwise the dropdown renders behind the modal (empty-looking list). Same class also needs adding to any outside-click guard that watches for SDK popovers inside modals.
+- **Deploy, don't just rebuild** — the host loads the deployed config bundle from S3, not your local build.

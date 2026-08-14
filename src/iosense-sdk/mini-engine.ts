@@ -146,9 +146,17 @@ function computeWindow(
   override?: { startTime: number; endTime: number },
 ): { startTime: number; endTime: number } {
   if (override) return override;
-  const { timeConfig } = envelope;
-  if (!timeConfig) return { startTime: Date.now() - 86_400_000, endTime: Date.now() };
   const now = Date.now();
+  // Default window when nothing else resolves: "Today" (local midnight → now),
+  // mirroring the widget's initialTimeFromConfig fallback so the fetched data
+  // matches what the date picker shows.
+  const todayWindow = () => {
+    const start = new Date(now);
+    start.setHours(0, 0, 0, 0);
+    return { startTime: start.getTime(), endTime: now };
+  };
+  const { timeConfig } = envelope;
+  if (!timeConfig) return todayWindow();
   // Fixed picker: resolve its single "set duration" (x/xEvent/xPeriod + y…).
   if (timeConfig.pickerType === 'fixed' && timeConfig.fixedDuration) {
     return resolveDurationWindow(timeConfig.fixedDuration, now, timeConfig.cycleTime);
@@ -159,5 +167,5 @@ function computeWindow(
   }
   const dur = timeConfig.allDurations?.find((d) => d.id === timeConfig.defaultDurationId);
   if (dur) return resolveDurationWindow(dur, now, timeConfig.cycleTime);
-  return { startTime: now - 86_400_000, endTime: now };
+  return todayWindow();
 }

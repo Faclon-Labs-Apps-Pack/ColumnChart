@@ -34,7 +34,7 @@ import {
   TimeConfig,
   Duration,
 } from '../../iosense-sdk/types';
-import { resolveDurationWindow } from '../../iosense-sdk/time';
+import { resolveDurationWindow, CALENDAR_DEFAULT_CYCLE_TIME } from '../../iosense-sdk/time';
 import './ColumnChart.css';
 
 interface ColumnChartProps {
@@ -66,6 +66,11 @@ const ALL_PERIODICITIES: Periodicity[] = ['Minute', 'Hourly', 'Daily', 'Weekly',
 // selection, and drill-down depth. Quarterly is the coarsest bucket the SDK
 // time-tab offers; Minute is the finest.
 const LEVEL_ORDER: Periodicity[] = ['Quarterly', 'Monthly', 'Weekly', 'Daily', 'Hourly', 'Minute'];
+
+// Cap on how many times the cycle-time correction re-asserts itself against a
+// host that keeps racing it with its own stale (calendar-window) fetch. See
+// the correction effect for the full race explanation.
+const MAX_CORRECTION_ATTEMPTS = 3;
 
 interface DrillEntry { label: string; startTime: number; endTime: number; }
 
@@ -757,11 +762,11 @@ interface InitialTime {
 // computeWindow so the picker matches the data window that gets fetched.
 function initialTimeFromConfig(timeConfig?: TimeConfig): InitialTime {
   const fallback = (): InitialTime => {
-    const r = getPresetDateRange('previous_7_days');
+    const r = getPresetDateRange('today');
     return {
-      range: r ?? { start: new Date(Date.now() - 7 * 86_400_000), end: new Date() },
-      presetId: 'previous_7_days',
-      presetLabel: 'Past 7 days',
+      range: r ?? { start: new Date(new Date().setHours(0, 0, 0, 0)), end: new Date() },
+      presetId: 'today',
+      presetLabel: 'Today',
     };
   };
   if (!timeConfig) return fallback();
@@ -790,6 +795,35 @@ function initialTimeFromConfig(timeConfig?: TimeConfig): InitialTime {
     presetId: dur.id,
     presetLabel: dur.label || dur.id,
   };
+}
+
+interface CycleCorrection {
+  needed: boolean;
+  aware?: { startTime: number; endTime: number };
+  dur?: Duration;
+  key?: string;
+}
+
+// Does the widget's default duration resolve to a different window once
+// timeConfig.cycleTime is honored than it does on plain calendar boundaries?
+// Shared by the initial-load skeleton gate (below) and the correction effect
+// in the component, so both agree on exactly when a correction is pending —
+// callable synchronously (no hooks) so the skeleton gate can use it during
+// the very first render, before any effect has run.
+function computeCycleCorrection(timeConfig?: TimeConfig): CycleCorrection {
+  if (!timeConfig?.cycleTime) return { needed: false };
+  const picker = timeConfig.pickerType ?? 'local';
+  if (picker === 'global') return { needed: false }; // GTP owns the window — never correct it
+  const dur = picker === 'fixed'
+    ? timeConfig.fixedDuration
+    : timeConfig.allDurations?.find((d) => d.id === timeConfig.defaultDurationId);
+  if (!dur) return { needed: false };
+  const now = Date.now();
+  const aware = resolveDurationWindow(dur, now, timeConfig.cycleTime);
+  const naive = resolveDurationWindow(dur, now, CALENDAR_DEFAULT_CYCLE_TIME);
+  if (aware.startTime === naive.startTime && aware.endTime === naive.endTime) return { needed: false };
+  const key = JSON.stringify([timeConfig.cycleTime, dur, timeConfig.defaultPeriodicity, picker]);
+  return { needed: true, aware, dur, key };
 }
 
 // Labels for the design-sdk DatePicker's built-in presets (mirrors its
@@ -839,6 +873,22 @@ function periodicityFromConfig(timeConfig?: TimeConfig): Periodicity {
   }
 }
 
+// "Current Year" always defaults to Monthly — a year-scale window bucketed
+// any coarser (Quarterly, just 4 bars) is barely a chart, and any finer
+// (Weekly/Daily) is noisy over a full year — regardless of what the coarsest
+// generally-available periodicity happens to be for this duration/range.
+// Applies whether Current Year is a widget-configured duration (calendarType
+// on the Duration object) or the date picker's own built-in preset (bare
+// preset id, no Duration object at all).
+function preferMonthlyForCurrentYear(
+  presetId: string,
+  dur: Duration | undefined,
+  periods: Periodicity[],
+): Periodicity | undefined {
+  const isCurrentYear = presetId === 'current_year' || dur?.calendarType === 'current_year';
+  return isCurrentYear && periods.includes('Monthly') ? 'Monthly' : periods[0];
+}
+
 // ── Component ─────────────────────────────────────────────────────────────────
 
 export function ColumnChart({ config = EMPTY_UI_CONFIG, data = [], onEvent, timeConfig }: ColumnChartProps) {
@@ -866,6 +916,16 @@ export function ColumnChart({ config = EMPTY_UI_CONFIG, data = [], onEvent, time
   const [presetLabel, setPresetLabel] = useState(() => initialTimeFromConfig(timeConfig).presetLabel);
   const [range, setRange] = useState<DateRange>(() => initialTimeFromConfig(timeConfig).range);
 
+  // True the moment we know (synchronously, before any effect runs) that the
+  // host's initial calendar-based fetch will disagree with the configured
+  // cycle time — e.g. a financial year starting in April. Gates the loading
+  // skeleton (see "Empty / loading states" below) so the mismatched Jan…now
+  // data the host resolves first is never painted; the widget stays on the
+  // skeleton until either the corrected data lands or a safety timeout fires.
+  // Lazy-initialized so it's already true on the very first render — the
+  // wrong window is never shown, not just swapped out quickly.
+  const [pendingCorrection, setPendingCorrection] = useState(() => computeCycleCorrection(timeConfig).needed);
+
   // Periodicity options derive from the active duration (its configured
   // periodicities), like GlobalTimePicker — not from the range length.
   const selectedDuration =
@@ -876,10 +936,11 @@ export function ColumnChart({ config = EMPTY_UI_CONFIG, data = [], onEvent, time
   const availablePeriodicities = [...durationPeriodicities(selectedDuration, range)]
     .sort((a, b) => LEVEL_ORDER.indexOf(a) - LEVEL_ORDER.indexOf(b));
   // Local picker defaults to the highest-order available periodicity (e.g. Daily
-  // when [Daily, Hourly] are offered); fixed/global stay config-driven.
+  // when [Daily, Hourly] are offered) — except Current Year, which always
+  // prefers Monthly; fixed/global stay config-driven.
   const [basePeriodicity, setBasePeriodicity] = useState<Periodicity>(() =>
     (timeConfig?.pickerType ?? 'local') === 'local'
-      ? (availablePeriodicities[0] ?? periodicityFromConfig(timeConfig))
+      ? (preferMonthlyForCurrentYear(preset, selectedDuration, availablePeriodicities) ?? periodicityFromConfig(timeConfig))
       : periodicityFromConfig(timeConfig),
   );
   // ── Shift / Compare mode (DatePicker toggles, driven by DATA not the toggle) ──
@@ -971,6 +1032,7 @@ export function ColumnChart({ config = EMPTY_UI_CONFIG, data = [], onEvent, time
   const [periodicityOpen, setPeriodicityOpen] = useState(false);
   const [drillPath, setDrillPath] = useState<DrillEntry[]>([]);
 
+  const shellRef = useRef<HTMLDivElement>(null);
   const settingsBtnRef = useRef<HTMLDivElement>(null);
   const settingsMenuRef = useRef<HTMLDivElement>(null);
   const [settingsOpen, setSettingsOpen] = useState(false);
@@ -980,17 +1042,29 @@ export function ColumnChart({ config = EMPTY_UI_CONFIG, data = [], onEvent, time
   const [exportOpen, setExportOpen] = useState(false);
   const [exportPos, setExportPos] = useState<{ top: number; left: number } | null>(null);
 
-  const [timeDrillDown,   setTimeDrillDown]   = useState(true);
+  // Defaults for these four (Time Drilldown, Clipping, Scroll, Inexact
+  // Multiple) come from the configurator's Style tab → "Default Chart
+  // Controls" section (config.style.controlDefaults) — previously hardcoded
+  // client-side state with no saved default at all. Legends/Data Labels are
+  // NOT here; those already persist via config.style.showLegend/showDataLabels
+  // (Hide Widget Elements). Fallbacks below match the OLD hardcoded values so
+  // a widget saved before this section existed behaves identically.
+  const [timeDrillDown,   setTimeDrillDown]   = useState(config.style.controlDefaults?.timeDrilldown ?? true);
   const [showLegend,      setShowLegend]      = useState(config.style.showLegend);
   const [showDataLabels,  setShowDataLabels]  = useState(config.style.showDataLabels);
-  const [clipping,        setClipping]        = useState(false);
+  const [clipping,        setClipping]        = useState(config.style.controlDefaults?.clipping ?? false);
   // Zoom is permanently on — there's no UI to toggle it. Kept as a const so
   // any code reading `zoomable` keeps working; the SDK ColumnChart silently
   // ignores this prop, so the actual zoom enablement happens in
   // `highchartsOptions.chart.zoomType = 'x'` (see buildChartDisplayData).
   const zoomable = true;
-  const [scrollable,      setScrollable]      = useState(false);
-  const [inexactMultiple, setInexactMultiple] = useState(false);
+  const [scrollable,      setScrollable]      = useState(config.style.controlDefaults?.scroll ?? false);
+  // Defaults to off — see the configurator's "Default Chart Controls" hint:
+  // turning this on made the host cascade the breakdown recursively through
+  // EVERY incomplete nested period at once (current year → month → week →
+  // day → hour), because "now" always sits mid-month/mid-week/mid-day. A
+  // widget creator can still opt in explicitly via the Style tab.
+  const [inexactMultiple, setInexactMultiple] = useState(config.style.controlDefaults?.inexactMultiple ?? false);
   // Latest committed control flags for emitTimeChange — a toggle sets state and
   // passes its NEW value as an override (state hasn't re-rendered yet); every
   // other emit site reads the current value off these refs.
@@ -1058,6 +1132,18 @@ export function ColumnChart({ config = EMPTY_UI_CONFIG, data = [], onEvent, time
     setShowDataLabels(config.style.showDataLabels);
   }, [config.style.showLegend, config.style.showDataLabels]);
 
+  // Re-sync Time Drilldown / Clipping / Scroll / Inexact Multiple from the
+  // configurator's "Default Chart Controls" whenever it changes — same
+  // pattern as the Legends/Data Labels sync above.
+  useEffect(() => {
+    const cd = config.style.controlDefaults;
+    setTimeDrillDown(cd?.timeDrilldown ?? true);
+    setClipping(cd?.clipping ?? false);
+    setScrollable(cd?.scroll ?? false);
+    setInexactMultiple(cd?.inexactMultiple ?? false);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [JSON.stringify(config.style.controlDefaults ?? null)]);
+
   // Re-sync the date picker from timeConfig — keeps the widget's internal
   // picker state aligned with externally configured defaults. Never emits:
   // TIME_CHANGE fires only from explicit user interaction (range pick,
@@ -1065,8 +1151,9 @@ export function ColumnChart({ config = EMPTY_UI_CONFIG, data = [], onEvent, time
   useEffect(() => {
     const init = initialTimeFromConfig(timeConfig);
     // Local picker defaults to the highest-order available periodicity for the
-    // resolved duration/range (e.g. Daily when [Daily, Hourly] are offered);
-    // fixed/global stay config-driven.
+    // resolved duration/range (e.g. Daily when [Daily, Hourly] are offered)
+    // — except Current Year, which always prefers Monthly; fixed/global stay
+    // config-driven.
     const isLocal = (timeConfig?.pickerType ?? 'local') === 'local';
     const dur =
       timeConfig?.allDurations?.find((d) => d.id === init.presetId) ??
@@ -1075,7 +1162,7 @@ export function ColumnChart({ config = EMPTY_UI_CONFIG, data = [], onEvent, time
       (a, b) => LEVEL_ORDER.indexOf(a) - LEVEL_ORDER.indexOf(b),
     );
     const periodicity = isLocal
-      ? periods[0] ?? periodicityFromConfig(timeConfig)
+      ? preferMonthlyForCurrentYear(init.presetId, dur, periods) ?? periodicityFromConfig(timeConfig)
       : periodicityFromConfig(timeConfig);
     setRange(init.range);
     setPreset(init.presetId);
@@ -1096,6 +1183,212 @@ export function ColumnChart({ config = EMPTY_UI_CONFIG, data = [], onEvent, time
     // local picker range — without this the picker wouldn't move on edit.
     JSON.stringify(timeConfig?.allDurations ?? []),
   ]);
+
+  // ── Initial cycle-time correction ─────────────────────────────────────────
+  // The host's engine SOMETIMES resolves the default duration on plain
+  // CALENDAR boundaries, ignoring timeConfig.cycleTime — e.g. a financial
+  // year starting April gets fetched as Jan→now instead. But not always: some
+  // duration/backend combinations already resolve cycle-aware windows
+  // correctly on their own initial fetch. Firing a corrective TIME_CHANGE
+  // unconditionally (the earlier version of this effect) is therefore
+  // sometimes REDUNDANT — and redundant isn't harmless: our corrective
+  // request explicitly asks for plain clipping/inexact-multiple-off buckets,
+  // silently discarding whatever richer default bucketing the host's own
+  // resolve had already applied (e.g. a day-by-day breakdown of the
+  // still-in-progress current period, collapsed into one flat monthly bar).
+  //
+  // So this WAITS for the host's own first response and only corrects if it
+  // actually looks wrong — comparing the served `data[].range.from` against
+  // the cycle-aware window vs a plain-calendar reference, whichever it's
+  // closer to tells us which one the host actually used. Zero extra fetches
+  // both when there's no cycleTime AND when the host already got it right.
+  //
+  // RACE (once a correction IS needed and fired): the host's own naive
+  // (Jan…now) fetch can still be in flight and resolve AFTER we've emitted
+  // the correction but BEFORE the corrected fetch's own response lands.
+  // Treating "any new `data` reference" as proof the correction landed would
+  // wrongly accept that stale response — the same range check guards this,
+  // re-emitting (bounded) instead of declaring victory on the first change.
+  //
+  // Keyed once per time-config shape (ref below) so StrictMode double-mounts
+  // and unrelated re-renders can't re-decide; a real time-tab edit produces a
+  // new key and re-checks against the host's next resolve for that shape.
+  const cycleCorrectionKeyRef = useRef<string | null>(null);
+  // Set once we've decided (from the FIRST real response for this shape) that
+  // the host got it wrong and we need to check whether our fix actually
+  // landed — everything before that point is the "haven't decided yet" state
+  // driven by `pendingCheckRef`.
+  const awaitingCorrectedDataRef = useRef(false);
+  const dataAtCorrectionRef = useRef<DataEntry[] | null>(null);
+  // The window/periodicity/duration our most recent emit asked for, plus the
+  // naive (uncorrected) start it's meant to displace — read back to tell a
+  // genuinely-corrected response apart from a late-arriving stale one, and to
+  // re-fire if needed.
+  const correctionTargetRef = useRef<{ startTime: number; naiveStart: number; dur: Duration } | null>(null);
+  const correctionAttemptsRef = useRef(0);
+  // Awaiting the FIRST real response for the current config shape, to judge
+  // whether the host needs correcting at all. Cleared the moment that
+  // decision is made (either way).
+  const pendingCheckRef = useRef<{ aware: { startTime: number; endTime: number }; naive: { startTime: number; endTime: number }; dur: Duration } | null>(null);
+
+  // Ensures the host applies the widget's configured default Clipping /
+  // Inexact Multiple (Style tab → "Default Chart Controls") at least once.
+  // Both ride on TIME_CHANGE, not a passive config channel, so the host only
+  // learns about a non-off default via an explicit emit — this fires ONE
+  // background, non-blocking request per mount, and only when at least one
+  // of them is actually on (nothing to request otherwise). When the
+  // cycle-time correction fires instead on this same mount, its own emit
+  // already carries these via the ref defaults in emitTimeChange, so
+  // `fireCorrection` marks this satisfied itself rather than double-firing.
+  const ensuredControlDefaultsRef = useRef(false);
+  function ensureControlDefaults() {
+    if (ensuredControlDefaultsRef.current) return;
+    ensuredControlDefaultsRef.current = true;
+    if (!clipping && !inexactMultiple) return;
+    const w = currentWindow();
+    emitTimeChange(w.start, w.end, basePeriodicity.toLowerCase(), undefined, { clipping, inexactMultiple });
+  }
+
+  function fireCorrection(aware: { startTime: number; endTime: number }, naive: { startTime: number; endTime: number }, dur: Duration) {
+    ensuredControlDefaultsRef.current = true; // this emit already carries clipping/inexactMultiple (ref defaults)
+    const picker = timeConfig?.pickerType ?? 'local';
+    // Mirror the picker's own initial periodicity choice (re-sync effect above):
+    // local snaps to the highest-order periodicity available for the duration;
+    // fixed stays config-driven.
+    const initRange: DateRange = { start: new Date(aware.startTime), end: new Date(aware.endTime) };
+    const periods = [...durationPeriodicities(dur, initRange)].sort(
+      (a, b) => LEVEL_ORDER.indexOf(a) - LEVEL_ORDER.indexOf(b),
+    );
+    const periodicity = picker === 'local'
+      ? preferMonthlyForCurrentYear(dur.id, dur, periods) ?? periodicityFromConfig(timeConfig)
+      : periodicityFromConfig(timeConfig);
+    // eslint-disable-next-line no-console
+    console.log('[ColumnChart] cycle-time correction: host window looked wrong, emitting corrected window', {
+      attempt: correctionAttemptsRef.current + 1,
+      cycleAware: { start: new Date(aware.startTime).toString(), end: new Date(aware.endTime).toString() },
+    });
+    awaitingCorrectedDataRef.current = true;
+    dataAtCorrectionRef.current = data;
+    correctionTargetRef.current = { startTime: aware.startTime, naiveStart: naive.startTime, dur };
+    emitTimeChange(aware.startTime, aware.endTime, periodicity.toLowerCase());
+  }
+
+  useEffect(() => {
+    const correction = computeCycleCorrection(timeConfig);
+    if (!timeConfig || !correction.needed || !correction.aware || !correction.key) {
+      // Nothing to correct for this config shape (no cycleTime, or it doesn't
+      // move the window) — never hold the skeleton up for it. Still worth
+      // ensuring the configured Clipping/Inexact Multiple default reaches
+      // the host.
+      pendingCheckRef.current = null;
+      setPendingCorrection(false);
+      ensureControlDefaults();
+      return;
+    }
+    const { aware, dur, key } = correction;
+    if (cycleCorrectionKeyRef.current === key) return; // already decided for this shape
+    cycleCorrectionKeyRef.current = key;
+    correctionAttemptsRef.current = 0;
+    // Clear any still-in-flight correction from a previous config shape so it
+    // doesn't collide with the fresh check about to start.
+    awaitingCorrectedDataRef.current = false;
+    correctionTargetRef.current = null;
+    const naive = resolveDurationWindow(dur!, Date.now(), CALENDAR_DEFAULT_CYCLE_TIME);
+    pendingCheckRef.current = { aware, naive, dur: dur! };
+    setPendingCorrection(true);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [
+    timeConfig?.defaultDurationId,
+    timeConfig?.pickerType,
+    timeConfig?.defaultPeriodicity,
+    JSON.stringify(timeConfig?.fixedDuration ?? null),
+    JSON.stringify(timeConfig?.cycleTime ?? null),
+    JSON.stringify(timeConfig?.allDurations ?? []),
+  ]);
+
+  useEffect(() => {
+    // Case A: a correction has already been fired — validate it (or re-fire,
+    // bounded, if a stale response won the race — see notes above).
+    if (awaitingCorrectedDataRef.current) {
+      if (data === dataAtCorrectionRef.current) return;
+      const target = correctionTargetRef.current;
+      const servedFrom = data.find((d) => typeof d.range?.from === 'number')?.range?.from;
+      const looksCorrected =
+        !target || servedFrom == null
+          ? true // nothing to validate against — accept rather than hang forever
+          : Math.abs(servedFrom - target.startTime) <= Math.abs(servedFrom - target.naiveStart);
+      if (looksCorrected) {
+        awaitingCorrectedDataRef.current = false;
+        correctionTargetRef.current = null;
+        setPendingCorrection(false);
+        return;
+      }
+      correctionAttemptsRef.current += 1;
+      if (correctionAttemptsRef.current >= MAX_CORRECTION_ATTEMPTS) {
+        // eslint-disable-next-line no-console
+        console.warn(
+          '[ColumnChart] cycle-time correction: gave up after', correctionAttemptsRef.current,
+          'attempts — host kept returning the uncorrected window',
+        );
+        awaitingCorrectedDataRef.current = false;
+        correctionTargetRef.current = null;
+        setPendingCorrection(false);
+        return;
+      }
+      const dur = target?.dur;
+      if (!dur) {
+        awaitingCorrectedDataRef.current = false;
+        setPendingCorrection(false);
+        return;
+      }
+      const now = Date.now();
+      const naive = resolveDurationWindow(dur, now, CALENDAR_DEFAULT_CYCLE_TIME);
+      const aware = resolveDurationWindow(dur, now, timeConfig?.cycleTime);
+      fireCorrection(aware, naive, dur);
+      return;
+    }
+
+    // Case B: waiting on the FIRST real response for the current shape, to
+    // decide whether the host needs correcting at all.
+    const pending = pendingCheckRef.current;
+    if (!pending) return;
+    const servedFrom = data.find((d) => typeof d.range?.from === 'number')?.range?.from;
+    if (servedFrom == null) {
+      if (data.length === 0) return; // still nothing to judge by — keep waiting
+      // Data arrived but carries no range info — can't tell if it's right or
+      // wrong. Assume it's fine rather than risk firing an unnecessary
+      // correction, which can itself regress the host's own bucketing.
+      // eslint-disable-next-line no-console
+      console.warn('[ColumnChart] cycle-time correction: served data has no range info to validate against — skipping correction check');
+      pendingCheckRef.current = null;
+      setPendingCorrection(false);
+      ensureControlDefaults();
+      return;
+    }
+    const looksAlreadyCorrect =
+      Math.abs(servedFrom - pending.aware.startTime) <= Math.abs(servedFrom - pending.naive.startTime);
+    pendingCheckRef.current = null;
+    if (looksAlreadyCorrect) {
+      // eslint-disable-next-line no-console
+      console.log('[ColumnChart] cycle-time correction: host already resolved the cycle-aware window on its own — no correction needed');
+      setPendingCorrection(false);
+      ensureControlDefaults();
+      return;
+    }
+    fireCorrection(pending.aware, pending.naive, pending.dur);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [data]);
+
+  // Safety net: if the host never acts on the corrective TIME_CHANGE (e.g. no
+  // live wiring in a preview context), don't hold the skeleton up forever.
+  useEffect(() => {
+    if (!pendingCorrection) return;
+    const timer = setTimeout(() => {
+      awaitingCorrectedDataRef.current = false;
+      setPendingCorrection(false);
+    }, 15_000);
+    return () => clearTimeout(timer);
+  }, [pendingCorrection]);
 
   useEffect(() => {
     // Consume the user-driven flag once per range change: a programmatic sync
@@ -1173,8 +1466,11 @@ export function ColumnChart({ config = EMPTY_UI_CONFIG, data = [], onEvent, time
   }
 
   // Skeleton only when at least one chart has series — otherwise the empty
-  // state is the canonical render for "no data source yet".
-  if (hasAnySeries && data.length === 0) {
+  // state is the canonical render for "no data source yet". Also holds while
+  // a cycle-time correction is in flight (see above) so the host's
+  // calendar-windowed initial data never flashes before the corrected window
+  // lands.
+  if (hasAnySeries && (data.length === 0 || pendingCorrection)) {
     return (
       <div className="cc-widget cc-widget--loading">
         <div className="cc-widget__skeleton" />
@@ -1660,31 +1956,36 @@ export function ColumnChart({ config = EMPTY_UI_CONFIG, data = [], onEvent, time
         shiftEnabled={draftShiftOn}
         onShiftToggle={draftActivateShift}
       />
-      <div style={{ width: 120 }}>
-        <SelectInput
-          label=""
-          value={basePeriodicity}
-          isOpen={periodicityOpen}
-          onClick={() => setPeriodicityOpen((v) => !v)}
-        >
-          {periodicityOpen && (
-            <DropdownMenu>
-              <ActionListItemGroup>
-                {/* availablePeriodicities is pre-sorted coarse→fine. */}
-                {availablePeriodicities.map((p) => (
-                  <ActionListItem
-                    key={p}
-                    title={p}
-                    selectionType="Single"
-                    isSelected={basePeriodicity === p}
-                    onClick={() => handlePeriodicityChange(p)}
-                  />
-                ))}
-              </ActionListItemGroup>
-            </DropdownMenu>
-          )}
-        </SelectInput>
-      </div>
+      {/* Periodicity selector — hidden when the time tab's "Disable
+          Periodicities" switch is on. The configured defaultPeriodicity still
+          drives basePeriodicity + TIME_CHANGE; only the picker UI is removed. */}
+      {!timeConfig?.disablePeriodicities && (
+        <div style={{ width: 120 }}>
+          <SelectInput
+            label=""
+            value={basePeriodicity}
+            isOpen={periodicityOpen}
+            onClick={() => setPeriodicityOpen((v) => !v)}
+          >
+            {periodicityOpen && (
+              <DropdownMenu>
+                <ActionListItemGroup>
+                  {/* availablePeriodicities is pre-sorted coarse→fine. */}
+                  {availablePeriodicities.map((p) => (
+                    <ActionListItem
+                      key={p}
+                      title={p}
+                      selectionType="Single"
+                      isSelected={basePeriodicity === p}
+                      onClick={() => handlePeriodicityChange(p)}
+                    />
+                  ))}
+                </ActionListItemGroup>
+              </DropdownMenu>
+            )}
+          </SelectInput>
+        </div>
+      )}
     </>
   ) : undefined;
 
@@ -1772,8 +2073,30 @@ export function ColumnChart({ config = EMPTY_UI_CONFIG, data = [], onEvent, time
 
   return (
     <div
-      className={`cc-widget-shell${advancedSettings?.enabled ? ' cc-widget-shell--title-styled' : ''}`}
+      ref={shellRef}
+      className={`cc-widget-shell${advancedSettings?.enabled ? ' cc-widget-shell--title-styled' : ''}${widgetElements.hideChartTitle ? ' cc-widget--hide-title' : ''}`}
       style={widgetTitleStyle}
+      // The chart-title switcher menu (`.fds-chart__view-switcher-menu`) is
+      // portaled to <body> and hard-capped at 600px by the SDK, so with many
+      // charts it overflows this widget and overlaps its neighbours. There's no
+      // hook into the SDK's title-button click, so on mousedown-capture (fires
+      // before the SDK opens the menu) we publish THIS widget's usable height to
+      // a root CSS var the portaled menu reads — capping it to the widget size
+      // and letting the SDK's own `__list` (overflow-y:auto) scroll instead.
+      // Per-widget correctness: whichever switcher was last pressed owns the var.
+      onMouseDownCapture={() => {
+        const el = shellRef.current;
+        if (!el) return;
+        // Subtract the title-row height (~48px) so the menu, which opens just
+        // below the title, still ends within the widget's bottom edge. Floor at
+        // 160px so short widgets keep a few scrollable rows; also never exceed
+        // the viewport so it can't run off-screen on a tall widget.
+        const usable = Math.max(
+          160,
+          Math.min(el.clientHeight - 48, window.innerHeight - 16),
+        );
+        document.documentElement.style.setProperty('--cc-view-menu-max-h', `${usable}px`);
+      }}
     >
       {/* Always render ChartSwitcher so the chart body renders consistently
           regardless of chart count. When there's only one item, the chevron
@@ -1785,7 +2108,6 @@ export function ColumnChart({ config = EMPTY_UI_CONFIG, data = [], onEvent, time
         filters={filtersSlot}
         actions={actionsSlot}
         className={[
-          widgetElements.hideChartTitle ? 'cc-widget--hide-title' : '',
           items.length <= 1 ? 'cc-widget--single-chart' : '',
           // When every header surface is hidden (title + every icon + no
           // duration + no filters + no breadcrumb), drop the header so the

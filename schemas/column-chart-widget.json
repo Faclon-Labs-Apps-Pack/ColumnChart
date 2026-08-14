@@ -1,0 +1,507 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://iosense.faclon.com/schemas/column-chart-widget.json",
+  "title": "ColumnChartWidget Envelope",
+  "description": "Configuration envelope for the IOsense ColumnChartWidget. Emitted by the configurator via onChange() and consumed by the mini-engine + widget renderer.",
+  "type": "object",
+  "required": ["_id", "type", "general", "uiConfig", "dynamicBindingPathList"],
+  "additionalProperties": false,
+  "$defs": {
+    "hexColor": {
+      "type": "string",
+      "description": "Hex color.",
+      "pattern": "^#([0-9a-fA-F]{3}|[0-9a-fA-F]{6})$"
+    },
+    "yAxisSide": {
+      "type": "integer",
+      "description": "Which Y axis the item is drawn against. 0 = left (default), 1 = right.",
+      "enum": [0, 1],
+      "default": 0
+    },
+    "fontWeight": {
+      "type": "string",
+      "enum": ["Regular", "Medium", "Semi-Bold", "Bold"]
+    },
+    "seriesConfig": {
+      "type": "object",
+      "description": "Time-series data source (series binding).",
+      "required": ["_id", "unsPath", "label"],
+      "additionalProperties": false,
+      "properties": {
+        "_id": { "type": "string" },
+        "unsPath": {
+          "type": "string",
+          "description": "Bindable — stores a {{topic}} series binding (e.g. {{uns:wsId://path}})."
+        },
+        "label": { "type": "string" },
+        "color": { "type": "string" },
+        "unit": { "type": "string" },
+        "precision": { "type": "number", "minimum": 0 },
+        "yAxis": { "$ref": "#/$defs/yAxisSide" }
+      }
+    },
+    "fixedSeriesConfig": {
+      "type": "object",
+      "description": "Fixed/scalar data source (scalar binding).",
+      "required": ["_id", "unsPath", "label"],
+      "additionalProperties": false,
+      "properties": {
+        "_id": { "type": "string" },
+        "unsPath": {
+          "type": "string",
+          "description": "Bindable — stores a {{topic}} scalar binding (e.g. {{uns:wsId://path}})."
+        },
+        "label": { "type": "string" },
+        "color": { "type": "string" },
+        "yAxis": { "$ref": "#/$defs/yAxisSide" }
+      }
+    },
+    "axisConfig": {
+      "type": "object",
+      "description": "Y-axis. A chart always owns a Left axis (axis_left) and may own one optional Right axis (axis_right).",
+      "required": ["_id", "name", "yAxis", "seriesIds"],
+      "additionalProperties": false,
+      "properties": {
+        "_id": {
+          "type": "string",
+          "enum": ["axis_left", "axis_right"],
+          "description": "Stable axis id: LEFT_AXIS_ID or RIGHT_AXIS_ID."
+        },
+        "name": {
+          "type": "string",
+          "description": "Axis title; '' = no title (left falls back to yAxisUnit)."
+        },
+        "yAxis": { "$ref": "#/$defs/yAxisSide" },
+        "seriesIds": {
+          "type": "array",
+          "description": "_id refs into series[] and fixedSeries[].",
+          "items": { "type": "string" }
+        }
+      }
+    },
+    "stackConfig": {
+      "type": "object",
+      "required": ["_id", "name", "seriesIds"],
+      "additionalProperties": false,
+      "properties": {
+        "_id": { "type": "string" },
+        "name": { "type": "string" },
+        "seriesIds": {
+          "type": "array",
+          "description": "_id refs into series[] and fixedSeries[].",
+          "items": { "type": "string" }
+        }
+      }
+    },
+    "plotLineConfig": {
+      "type": "object",
+      "required": ["_id", "value", "label", "color"],
+      "additionalProperties": false,
+      "properties": {
+        "_id": { "type": "string" },
+        "value": {
+          "type": ["number", "string"],
+          "description": "Numeric threshold, or a {{topic}} binding (string) resolved at runtime."
+        },
+        "label": { "type": "string" },
+        "color": { "type": "string" },
+        "width": { "type": "number", "minimum": 0 },
+        "dashStyle": {
+          "type": "string",
+          "enum": ["Solid", "Dash", "Dot", "DashDot", "LongDash", "ShortDash"]
+        },
+        "periodicityType": {
+          "type": "string",
+          "enum": ["independent", "dependent"]
+        },
+        "periodicities": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "enum": ["hourly", "daily", "weekly", "monthly"]
+          }
+        },
+        "yAxis": { "$ref": "#/$defs/yAxisSide" }
+      }
+    },
+    "plotBandConfig": {
+      "type": "object",
+      "required": ["_id", "from", "to", "label", "color"],
+      "additionalProperties": false,
+      "properties": {
+        "_id": { "type": "string" },
+        "from": {
+          "type": ["number", "string"],
+          "description": "Band start; number, or a {{topic}} binding (string) resolved at runtime."
+        },
+        "to": {
+          "type": ["number", "string"],
+          "description": "Band end; number, or a {{topic}} binding (string) resolved at runtime."
+        },
+        "label": { "type": "string" },
+        "color": { "type": "string" },
+        "yAxis": { "$ref": "#/$defs/yAxisSide" }
+      }
+    },
+    "chartConfig": {
+      "type": "object",
+      "required": ["_id", "title", "series", "fixedSeries", "axes", "stacks", "plotLines", "plotBands"],
+      "additionalProperties": false,
+      "properties": {
+        "_id": { "type": "string" },
+        "title": { "type": "string" },
+        "description": { "type": "string" },
+        "series": { "type": "array", "items": { "$ref": "#/$defs/seriesConfig" } },
+        "fixedSeries": { "type": "array", "items": { "$ref": "#/$defs/fixedSeriesConfig" } },
+        "axes": { "type": "array", "items": { "$ref": "#/$defs/axisConfig" } },
+        "stacks": { "type": "array", "items": { "$ref": "#/$defs/stackConfig" } },
+        "plotLines": { "type": "array", "items": { "$ref": "#/$defs/plotLineConfig" } },
+        "plotBands": { "type": "array", "items": { "$ref": "#/$defs/plotBandConfig" } }
+      }
+    },
+    "duration": {
+      "type": "object",
+      "required": ["id", "xPeriod"],
+      "additionalProperties": false,
+      "properties": {
+        "id": { "type": "string" },
+        "label": { "type": "string" },
+        "navigation": { "type": "string", "description": "e.g. 'Previous'." },
+        "x": { "type": "number", "description": "Start offset count." },
+        "xPeriod": {
+          "type": "string",
+          "description": "'minute' | 'hour' | 'day' | 'week' | 'month' | 'year'."
+        },
+        "xEvent": {
+          "type": "string",
+          "description": "'Start' | 'End' | 'Now' — boundary the start snaps to."
+        },
+        "y": { "type": "number", "description": "End offset count." },
+        "yPeriod": { "type": "string" },
+        "yEvent": {
+          "type": "string",
+          "description": "'Start' | 'End' | 'Now' — boundary the end snaps to."
+        },
+        "calendarType": {
+          "type": "string",
+          "description": "e.g. 'today' | 'yesterday' | 'current_month'."
+        },
+        "periodicities": { "type": "array", "items": { "type": "string" } }
+      }
+    },
+    "cycleTime": {
+      "type": "object",
+      "description": "Cycle-time boundaries. hour:minute = day boundary, dayOfWeek = week boundary (0=Sun), date = month boundary day, month = year boundary (month name).",
+      "additionalProperties": false,
+      "properties": {
+        "identifier": { "type": "string", "enum": ["start", "end"] },
+        "hour": { "type": ["string", "number"] },
+        "minute": { "type": ["string", "number"] },
+        "dayOfWeek": { "type": ["integer", "null"], "minimum": 0, "maximum": 6 },
+        "date": { "type": ["string", "number"] },
+        "month": { "type": "string", "description": "Month name, e.g. \"January\"." }
+      }
+    },
+    "timeShift": {
+      "type": "object",
+      "required": ["id", "name", "color", "startTime", "endTime"],
+      "additionalProperties": false,
+      "properties": {
+        "id": { "type": "string" },
+        "name": { "type": "string" },
+        "color": { "type": "string" },
+        "startTime": { "type": "string", "description": "\"HH:mm\" local time-of-day start." },
+        "endTime": {
+          "type": "string",
+          "description": "\"HH:mm\" local time-of-day end (may wrap past midnight, e.g. 22:00 -> 06:00)."
+        },
+        "enabled": { "type": "boolean", "default": true }
+      }
+    },
+    "deviationPattern": {
+      "type": "string",
+      "enum": ["green-up-positive", "red-up-positive"],
+      "description": "green-up-positive = increase is good; red-up-positive = increase is bad."
+    }
+  },
+  "properties": {
+    "_id": {
+      "type": "string",
+      "description": "Unique widget instance id."
+    },
+    "type": {
+      "const": "ColumnChart",
+      "description": "Widget type discriminator."
+    },
+    "general": {
+      "type": "object",
+      "required": ["title"],
+      "additionalProperties": false,
+      "properties": {
+        "title": {
+          "type": "string",
+          "description": "Human-readable widget title."
+        }
+      }
+    },
+    "timeConfig": {
+      "type": "object",
+      "description": "Time-window resolution config driving the widget's date picker and TIME_CHANGE events.",
+      "required": ["timezone", "type", "startTime", "endTime", "defaultDurationId", "allDurations", "defaultPeriodicity"],
+      "additionalProperties": false,
+      "properties": {
+        "timezone": { "type": "string" },
+        "type": {
+          "type": "string",
+          "description": "'local' | 'fixed' (free-form).",
+          "examples": ["local", "fixed"]
+        },
+        "cycleTime": { "$ref": "#/$defs/cycleTime" },
+        "pickerType": {
+          "type": "string",
+          "enum": ["local", "fixed", "global"],
+          "description": "local = user-controllable rolling window; fixed/global = time controlled externally (widget hides its picker)."
+        },
+        "startTime": { "type": ["number", "null"] },
+        "endTime": { "type": ["number", "null"] },
+        "fixedDuration": { "$ref": "#/$defs/duration" },
+        "defaultDurationId": { "type": "string" },
+        "allDurations": { "type": "array", "items": { "$ref": "#/$defs/duration" } },
+        "defaultPeriodicity": {
+          "type": "string",
+          "enum": ["minute", "hourly", "daily", "weekly", "monthly", "quarterly"]
+        },
+        "shifts": {
+          "type": "array",
+          "description": "Shifts configured in the time tab; non-empty enables the DatePicker's Shift toggle.",
+          "items": { "$ref": "#/$defs/timeShift" }
+        },
+        "shiftAggregator": {
+          "type": "string",
+          "description": "Aggregation operator applied per shift when Shift mode is active."
+        },
+        "comparisonMode": {
+          "type": "boolean",
+          "description": "Enables the DatePicker's Compare toggle."
+        },
+        "deviationPattern": { "$ref": "#/$defs/deviationPattern" },
+        "allowPerSourceIndicator": {
+          "type": "boolean",
+          "description": "When on, deviation polarity can be overridden per data source."
+        },
+        "sourceDeviationOverrides": {
+          "type": "object",
+          "description": "Per-source polarity overrides, keyed `${chartId}:${seriesId}`.",
+          "additionalProperties": { "$ref": "#/$defs/deviationPattern" }
+        }
+      }
+    },
+    "timeTabConfig": {
+      "type": "object",
+      "description": "Opaque raw time-tab config carried through the envelope.",
+      "additionalProperties": true
+    },
+    "uiConfig": {
+      "type": "object",
+      "description": "Render configuration for the column chart.",
+      "required": ["title", "charts", "style"],
+      "additionalProperties": false,
+      "properties": {
+        "title": { "type": "string" },
+        "description": { "type": "string" },
+        "charts": {
+          "type": "array",
+          "description": "One or more chart definitions rendered by the widget.",
+          "items": { "$ref": "#/$defs/chartConfig" }
+        },
+        "activeChartId": {
+          "type": "string",
+          "description": "_id of the currently selected chart."
+        },
+        "style": {
+          "type": "object",
+          "required": ["card", "stacked", "showLegend", "showDataLabels", "yAxisUnit"],
+          "additionalProperties": false,
+          "properties": {
+            "card": {
+              "type": "object",
+              "required": ["wrapInCard", "bg"],
+              "additionalProperties": false,
+              "properties": {
+                "wrapInCard": { "type": "boolean" },
+                "bg": { "type": "string" },
+                "backgroundColor": { "type": "string" },
+                "borderColor": { "type": "string" },
+                "borderWidth": { "type": "number", "minimum": 0 },
+                "borderRadius": { "type": "number", "minimum": 0 }
+              }
+            },
+            "stacked": { "type": "boolean" },
+            "showLegend": { "type": "boolean" },
+            "showDataLabels": { "type": "boolean" },
+            "yAxisUnit": { "type": "string" },
+            "widgetSize": {
+              "type": "object",
+              "required": ["preset", "width", "height"],
+              "additionalProperties": false,
+              "properties": {
+                "preset": {
+                  "type": "string",
+                  "enum": ["Small", "Medium", "Large", "Custom"]
+                },
+                "width": { "type": "number", "minimum": 0 },
+                "height": { "type": "number", "minimum": 0 },
+                "locked": { "type": "boolean" }
+              }
+            },
+            "widgetElements": {
+              "type": "object",
+              "required": ["hideWidgetElements", "hideSettingsIcon", "hideExportIcon", "hideChartTitle"],
+              "additionalProperties": false,
+              "properties": {
+                "hideWidgetElements": { "type": "boolean" },
+                "hideSettingsIcon": { "type": "boolean" },
+                "hideExportIcon": { "type": "boolean" },
+                "hideChartTitle": { "type": "boolean" },
+                "hideInfoIcon": { "type": "boolean" }
+              }
+            },
+            "advancedSettings": {
+              "type": "object",
+              "required": [
+                "enabled", "titleFontSize", "titleFontColor", "titleFontWeight",
+                "xAxisTextColor", "xAxisLineColor", "yAxisTextColor", "yAxisLineColor",
+                "gridLineColor", "legendTextColor",
+                "dataTableHeaderBgColor", "dataTableHeaderTextColor", "dataTableHeaderTextSize",
+                "dataTableHeaderTextWeight", "dataTableBaseFontSize", "dataTableBaseFontWeight",
+                "dataTableBaseFontColor"
+              ],
+              "additionalProperties": false,
+              "properties": {
+                "enabled": { "type": "boolean" },
+                "titleFontSize": { "type": "number", "minimum": 0 },
+                "titleFontColor": { "type": "string" },
+                "titleFontWeight": { "$ref": "#/$defs/fontWeight" },
+                "xAxisTextColor": { "type": "string" },
+                "xAxisLineColor": { "type": "string" },
+                "yAxisTextColor": { "type": "string" },
+                "yAxisLineColor": { "type": "string" },
+                "gridLineColor": { "type": "string" },
+                "legendTextColor": { "type": "string" },
+                "dataTableHeaderBgColor": { "type": "string" },
+                "dataTableHeaderTextColor": { "type": "string" },
+                "dataTableHeaderTextSize": { "type": "number", "minimum": 0 },
+                "dataTableHeaderTextWeight": { "$ref": "#/$defs/fontWeight" },
+                "dataTableBaseFontSize": { "type": "number", "minimum": 0 },
+                "dataTableBaseFontWeight": { "$ref": "#/$defs/fontWeight" },
+                "dataTableBaseFontColor": { "type": "string" }
+              }
+            }
+          }
+        }
+      }
+    },
+    "dynamicBindingPathList": {
+      "type": "array",
+      "description": "Bindings extracted from bindable uiConfig fields containing {{topic}}. Built by buildDynamicBindingPathList(uiConfig) before every onChange().",
+      "items": {
+        "oneOf": [
+          {
+            "type": "object",
+            "description": "Scalar binding (e.g. a fixedSeries unsPath, plotLine value, or plotBand from/to).",
+            "required": ["key", "topic"],
+            "additionalProperties": false,
+            "properties": {
+              "key": {
+                "type": "string",
+                "description": "Dot-path to the bound uiConfig field (e.g. \"charts.0.fixedSeries.1.unsPath\")."
+              },
+              "topic": {
+                "type": "string",
+                "description": "UNS topic extracted from {{topic}}."
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "Series binding (a series unsPath).",
+            "required": ["key", "topic", "type"],
+            "additionalProperties": false,
+            "properties": {
+              "key": { "type": "string" },
+              "topic": { "type": "string" },
+              "type": { "const": "series" }
+            }
+          }
+        ]
+      }
+    }
+  },
+  "examples": [
+    {
+      "_id": "cc_001",
+      "type": "ColumnChart",
+      "general": { "title": "Line 1 Output" },
+      "timeConfig": {
+        "timezone": "Asia/Kolkata",
+        "type": "local",
+        "pickerType": "local",
+        "startTime": null,
+        "endTime": null,
+        "defaultDurationId": "last_24h",
+        "allDurations": [
+          { "id": "last_24h", "label": "Last 24 hours", "x": 24, "xPeriod": "hour", "xEvent": "Now" }
+        ],
+        "defaultPeriodicity": "hourly"
+      },
+      "uiConfig": {
+        "title": "Line 1 Output",
+        "charts": [
+          {
+            "_id": "chart_1",
+            "title": "Throughput",
+            "series": [
+              {
+                "_id": "s1",
+                "unsPath": "{{uns:ws1://plantA/line1/output}}",
+                "label": "Output",
+                "color": "#4C6FFF",
+                "unit": "units",
+                "precision": 0,
+                "yAxis": 0
+              }
+            ],
+            "fixedSeries": [],
+            "axes": [
+              { "_id": "axis_left", "name": "", "yAxis": 0, "seriesIds": ["s1"] }
+            ],
+            "stacks": [],
+            "plotLines": [
+              {
+                "_id": "pl1",
+                "value": "{{uns:ws1://plantA/line1/target}}",
+                "label": "Target",
+                "color": "#FF5C5C",
+                "dashStyle": "Dash",
+                "yAxis": 0
+              }
+            ],
+            "plotBands": []
+          }
+        ],
+        "activeChartId": "chart_1",
+        "style": {
+          "card": { "wrapInCard": true, "bg": "#FFFFFF" },
+          "stacked": false,
+          "showLegend": true,
+          "showDataLabels": false,
+          "yAxisUnit": "units"
+        }
+      },
+      "dynamicBindingPathList": [
+        { "key": "charts.0.series.0.unsPath", "topic": "uns:ws1://plantA/line1/output", "type": "series" },
+        { "key": "charts.0.plotLines.0.value", "topic": "uns:ws1://plantA/line1/target" }
+      ]
+    }
+  ]
+}

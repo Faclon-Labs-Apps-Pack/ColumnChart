@@ -44,6 +44,21 @@ export default function App() {
     timeConfig: envelope?.timeConfig,
   }), [envelope?.dynamicBindingPathList, envelope?.timeConfig]);
 
+  // A time-config change from the configurator invalidates any user-picked
+  // window: without this, one TIME_CHANGE (user pick OR the widget's
+  // cycle-time correction) pins `timeOverride` forever and later Time-tab
+  // edits silently stop affecting the fetched window. Mirrors the production
+  // host, which re-resolves from the envelope on every save. Keyed on the
+  // serialized timeConfig so envelope echoes with an unchanged timeConfig
+  // (style/data edits) don't clear an active override.
+  const timeConfigKey = useMemo(
+    () => JSON.stringify(envelope?.timeConfig ?? null),
+    [envelope?.timeConfig],
+  );
+  useEffect(() => {
+    setTimeOverride(undefined);
+  }, [timeConfigKey]);
+
   useEffect(() => {
     if (!envelope || !auth) return;
     console.log('[App] resolving envelope:', envelope.dynamicBindingPathList, 'override:', timeOverride);
