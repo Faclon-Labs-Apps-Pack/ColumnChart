@@ -819,6 +819,44 @@ export function ColumnChartConfiguration(props: ColumnChartConfigurationProps) {
     return () => EVENTS.forEach((ev) => document.removeEventListener(ev, guard));
   }, []);
 
+  // Guard against the host dashboard's global "delete widget" keybinding firing
+  // when the user presses Backspace / Delete (the ⌫ key on a Mac) while typing
+  // in a configurator field — including fields inside portaled modals. The host
+  // binds Delete/Backspace on document/window to remove the selected widget from
+  // the data layer; those key events bubble up out of our inputs and trigger it
+  // mid-typing, wiping the widget.
+  //
+  // We listen on `document.body` in BUBBLE phase: by the time the event reaches
+  // body it has already passed through the input (native character deletion) and
+  // our React root container (controlled-input onChange), so stopping propagation
+  // here is safe for the field — the keystroke still edits the text — yet it
+  // blocks the host's document/window listeners sitting above us. We never
+  // preventDefault. Scoped to editable targets that belong to us (inside the
+  // config root, or inside an SDK modal we opened) so Delete elsewhere on the
+  // page is untouched.
+  useEffect(() => {
+    const guard = (e: KeyboardEvent) => {
+      if (e.key !== 'Backspace' && e.key !== 'Delete') return;
+      const path = (e as unknown as { composedPath?: () => EventTarget[] }).composedPath?.() ?? [];
+      const editable = path.find(
+        (n): n is HTMLElement =>
+          n instanceof HTMLElement &&
+          (n.tagName === 'INPUT' || n.tagName === 'TEXTAREA' || n.isContentEditable),
+      );
+      if (!editable) return;
+      const ours =
+        (configRef.current?.contains(editable) ?? false) ||
+        editable.closest('.fds-modal') !== null;
+      if (!ours) return;
+      e.stopPropagation();
+      e.stopImmediatePropagation();
+    };
+    const listener = guard as EventListener;
+    const EVENTS: Array<keyof HTMLElementEventMap> = ['keydown', 'keyup'];
+    EVENTS.forEach((ev) => document.body.addEventListener(ev, listener));
+    return () => EVENTS.forEach((ev) => document.body.removeEventListener(ev, listener));
+  }, []);
+
   // TEMP DIAGNOSTIC: the guard above is confirmed to block BOTH pointerdown
   // and mousedown from ever reaching document (console-verified), yet the
   // Add/Edit Duration panel still closes when a Periodicity option is

@@ -15,6 +15,7 @@ import { IconButton } from '@faclon-labs/design-sdk/IconButton';
 import { Home, Settings, Menu, Info } from 'react-feather';
 import { Tooltip } from '@faclon-labs/design-sdk/Tooltip';
 import { EmptyState, NoDataOneIllustration, AddWidgetIllustration } from '@faclon-labs/design-sdk/EmptyState';
+import { Spinner } from '@faclon-labs/design-sdk/Spinner';
 import type {
   ChartComparisonConfig,
   ComparisonSeriesInput,
@@ -926,6 +927,43 @@ export function ColumnChart({ config = EMPTY_UI_CONFIG, data = [], onEvent, time
   // wrong window is never shown, not just swapped out quickly.
   const [pendingCorrection, setPendingCorrection] = useState(() => computeCycleCorrection(timeConfig).needed);
 
+  // ── Refetch loading state (time / periodicity change) ──────────────────────
+  // When the user changes the window, periodicity, drills down, or toggles a
+  // chart control, the widget emits TIME_CHANGE and the host refetches. Until the
+  // new `data` prop lands we'd otherwise keep showing the previous chart with no
+  // feedback — so flip on the loading skeleton the moment we emit, and clear it
+  // once a fresh `data` reference arrives (success OR empty/error) or a safety
+  // timeout fires. `refetching` is only ever set post-mount from emitTimeChange
+  // (which itself no-ops before mount), so it never interferes with initial load.
+  const [refetching, setRefetching] = useState(false);
+  // The `data` reference captured at emit time — any change from it means the
+  // host responded (even an empty array returned on error is a new reference).
+  const dataAtRefetchRef = useRef<DataEntry[] | null>(null);
+  // True once a refetch came back with zero rows (host error or a genuinely
+  // empty window), so we show the dedicated "no data" screen instead of hanging
+  // on the skeleton forever.
+  const [refetchEmpty, setRefetchEmpty] = useState(false);
+
+  // Clear the refetch skeleton when the host delivers a new `data` reference.
+  useEffect(() => {
+    if (!refetching || dataAtRefetchRef.current === null) return;
+    if (data === dataAtRefetchRef.current) return; // host hasn't responded yet
+    setRefetching(false);
+    setRefetchEmpty(data.length === 0);
+    dataAtRefetchRef.current = null;
+  }, [data, refetching]);
+
+  // Safety net: if the host never responds to the TIME_CHANGE (e.g. no live
+  // wiring in a preview context), don't hold the skeleton up forever.
+  useEffect(() => {
+    if (!refetching) return;
+    const timer = setTimeout(() => {
+      setRefetching(false);
+      dataAtRefetchRef.current = null;
+    }, 15_000);
+    return () => clearTimeout(timer);
+  }, [refetching]);
+
   // Periodicity options derive from the active duration (its configured
   // periodicities), like GlobalTimePicker — not from the range length.
   const selectedDuration =
@@ -1465,18 +1503,21 @@ export function ColumnChart({ config = EMPTY_UI_CONFIG, data = [], onEvent, time
     );
   }
 
-  // Skeleton only when at least one chart has series — otherwise the empty
-  // state is the canonical render for "no data source yet". Also holds while
-  // a cycle-time correction is in flight (see above) so the host's
-  // calendar-windowed initial data never flashes before the corrected window
-  // lands.
-  if (hasAnySeries && (data.length === 0 || pendingCorrection)) {
-    return (
-      <div className="cc-widget cc-widget--loading">
-        <div className="cc-widget__skeleton" />
-      </div>
-    );
-  }
+  // Loading / empty-result are rendered INSIDE the chart body (the ChartSwitcher
+  // item's children) — NOT as a full-widget takeover — so the header, duration,
+  // filters, breadcrumb and actions chrome stays put while only the canvas area
+  // swaps to a loader (or a no-data message). Flags computed here; consumed in
+  // the items map below.
+  //   • chartLoading holds while:
+  //       – initial load: data empty and no refetch has resolved empty yet
+  //       – pendingCorrection: cycle-time correction round-trip
+  //       – refetching: a time/periodicity TIME_CHANGE is awaiting the response
+  //     so the stale chart is never shown against the newly-requested window.
+  //   • chartNoData: a refetch came back with zero rows (host error or a
+  //     genuinely empty window) — show a no-data message, not an endless loader.
+  const chartLoading =
+    hasAnySeries && (pendingCorrection || refetching || (data.length === 0 && !refetchEmpty));
+  const chartNoData = hasAnySeries && data.length === 0 && refetchEmpty;
 
   // ── Shared time helpers ───────────────────────────────────────────────────
 
@@ -1516,6 +1557,11 @@ export function ColumnChart({ config = EMPTY_UI_CONFIG, data = [], onEvent, time
     // eslint-disable-next-line no-console
     console.log('[ColumnChart] emitting TIME_CHANGE', payload);
     onEvent({ type: 'TIME_CHANGE', payload });
+    // Show the loading skeleton until the host answers this request with a fresh
+    // `data` reference (see the refetch-clearing effect above).
+    dataAtRefetchRef.current = data;
+    setRefetchEmpty(false);
+    setRefetching(true);
   }
 
   // The window currently on screen — the deepest drill crumb when drilled,
@@ -1664,6 +1710,42 @@ export function ColumnChart({ config = EMPTY_UI_CONFIG, data = [], onEvent, time
               illustration={<AddWidgetIllustration />}
               title="No data source configured"
               description="Add a data source from the configurator to populate this chart."
+            />
+          </div>
+        ),
+      };
+    }
+
+    // Loading (initial fetch / cycle correction / time-or-periodicity refetch):
+    // render the SDK Spinner as the chart body so the header, duration, filters
+    // and breadcrumb chrome stay put while only the canvas swaps to a loader.
+    if (chartLoading) {
+      return {
+        id: chart._id || `chart-${ci}`,
+        label: tabLabel,
+        type: 'column' as const,
+        children: (
+          <div className="cc-widget__loading-body">
+            <Spinner size="Large" label="Loading data…" />
+          </div>
+        ),
+      };
+    }
+
+    // The refetch came back empty (host error or a genuinely empty window) —
+    // a no-data message in the body, chrome intact, so the user can adjust the
+    // range/periodicity without the whole widget disappearing.
+    if (chartNoData) {
+      return {
+        id: chart._id || `chart-${ci}`,
+        label: tabLabel,
+        type: 'column' as const,
+        children: (
+          <div className="cc-widget__empty-body">
+            <EmptyState
+              illustration={<NoDataOneIllustration />}
+              title="No data for this selection"
+              description="No data was returned for this time range. Try a different range or periodicity."
             />
           </div>
         ),
